@@ -1,0 +1,10 @@
+*~
+.ensime*
+.project
+.idea
+*.iml
+.classpath
+scratch
+*.DS_Store
+target
+libmesos.dylib

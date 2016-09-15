@@ -1,0 +1,5 @@
+((nil . ((fill-column . 120)
+         (column-enforce-column . 120)
+         (scala-test:main-file-format . "%s/src/main/scala/%s%s.scala")
+         (scala-test:test-file-format . "%s/src/test/scala/%s%sTest.scala")
+         (mode . column-enforce))))
