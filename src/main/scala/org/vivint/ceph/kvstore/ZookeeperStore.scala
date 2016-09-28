@@ -3,6 +3,7 @@ package org.vivint.ceph.kvstore
 import org.apache.curator.framework.CuratorFramework
 import org.apache.zookeeper.KeeperException
 import scala.concurrent.{ ExecutionContext, Future }
+import scala.collection.JavaConversions._
 import scala.util.Try
 
 class ZookeeperStore(client: CuratorFramework)(implicit ec: ExecutionContext) extends KVStore {
@@ -38,5 +39,9 @@ class ZookeeperStore(client: CuratorFramework)(implicit ec: ExecutionContext) ex
       case _: KeeperException.NoNodeException =>
         None
     }
+  }
+
+  def children(path: String): Future[Seq[String]] = Future {
+    client.getChildren.forPath(path).toSeq
   }
 }

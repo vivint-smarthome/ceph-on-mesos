@@ -1,6 +1,7 @@
 package org.vivint.ceph
 
 import org.rogach.scallop._
+import scala.concurrent.duration._
 
 class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
   val master = opt[String]("master", 'm',
@@ -21,6 +22,11 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
     required = true,
     descr = "Location for zookeeper for ceph-framework to store it's state")
 
+  val offerTimeout = opt[Int]("offer-timeout", 't',
+    descr = "Duration in seconds after which offers timeout",
+    required = false,
+    default = Option(10))
+
   verify()
 }
 case class AppConfiguration(
@@ -28,9 +34,10 @@ case class AppConfiguration(
   name: String,
   principal: Option[String],
   secret: Option[String],
-  zookeeper: String)
+  zookeeper: String,
+  offerTimeout: FiniteDuration)
 
-object AppConfiguration extends ((String, String, Option[String], Option[String], String) => AppConfiguration) {
+object AppConfiguration {
   def fromArgs(args: List[String]): AppConfiguration = {
     val o = new CephFrameworkOptions(args)
     AppConfiguration(
@@ -38,6 +45,7 @@ object AppConfiguration extends ((String, String, Option[String], Option[String]
       name = o.name(),
       principal = o.principal.toOption,
       secret = o.secret.toOption,
-      zookeeper = o.zookeeper())
+      zookeeper = o.zookeeper(),
+      offerTimeout = o.offerTimeout().seconds)
   }
 }
