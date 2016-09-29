@@ -11,14 +11,7 @@ import scaldi.Module
 trait ZookeeperModule extends Module {
   private val appConfiguration = inject[AppConfiguration]
 
-  import org.apache.curator.retry.ExponentialBackoffRetry
-  private val retryPolicy = new ExponentialBackoffRetry(1000, 3)
 
-  bind [CuratorFramework] to CuratorFrameworkFactory.builder.
-    connectString(appConfiguration.zookeeper).
-    namespace("ceph-on-mesos").
-    retryPolicy(retryPolicy).
-    build()
 }
 
 class Configuration(args: List[String]) extends Module {
@@ -44,7 +37,14 @@ trait FrameworkModule extends Module {
 
 class Universe(args: List[String]) extends Configuration(args) with Module with ZookeeperModule /*with FrameworkModule*/ {
   implicit val system = ActorSystem("ceph-on-mesos")
-  bind [KVStore] to (new kvstore.ZookeeperStore(inject[CuratorFramework])(zookeeperDispatcher))
+  bind [ActorRef] identifiedBy (classOf[kvstore.ZookeeperActor]) to {
+    system.actorOf(
+      Props(new kvstore.ZookeeperActor).withDispatcher("zookeeper-dispatcher"),
+      "zookeeper-actor")
+  }
+
+  bind [KVStore] to (new kvstore.ZookeeperStore)
+  bind [FrameworkIdStore] to (new FrameworkIdStore)
   bind [ActorSystem] to system
   bind [Option[Credential]] to {
     val options = inject[AppConfiguration]
@@ -58,8 +58,6 @@ class Universe(args: List[String]) extends Configuration(args) with Module with 
         build()
     }
   }
-
-  val zookeeperDispatcher = system.dispatchers.lookup("zookeeper-dispatcher")
 
   bind [ActorRef] identifiedBy (classOf[TaskActor]) to {
     system.actorOf(Props(new TaskActor), "framework-actor")

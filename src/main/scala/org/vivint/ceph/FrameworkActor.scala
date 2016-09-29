@@ -16,7 +16,7 @@ import scala.collection.JavaConverters._
 
 class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
   val kvStore = CrashingKVStore(inject[KVStore])
-  val frameworkStore = FrameworkIdStore(kvStore)
+  val frameworkStore = inject[FrameworkIdStore]
   val frameworkTemplate = inject[FrameworkInfo]
   val credentials = inject[Option[Credential]]
   val options = inject[AppConfiguration]
@@ -26,7 +26,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
   case class FrameworkIdLoaded(o: Option[FrameworkID])
   override def preStart(): Unit = {
     import context.dispatcher
-    frameworkStore.get.map(FrameworkIdLoaded) pipeTo self
+    frameworkStore.initial.map(FrameworkIdLoaded) pipeTo self
   }
 
   override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
@@ -118,7 +118,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         case DeclineOffer(offerId, refuseFor) =>
           processingOffer(offerId) {
             log.debug(s"Decline offer {}", offerId)
-            driver.declineOffer(offerId, ProtoHelpers.filters(refuseFor))
+            driver.declineOffer(offerId, ProtoHelpers.newFilters(refuseFor))
           }
         case AcceptOffer(offerId, operations) =>
           processingOffer(offerId) {
@@ -127,7 +127,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
             driver.acceptOffers(
               Collections.singleton(offerId),
               operations.asJava,
-              ProtoHelpers.filters(Some(0.seconds)))
+              ProtoHelpers.newFilters(Some(0.seconds)))
           }
 
         case Reconcile(tasks) =>

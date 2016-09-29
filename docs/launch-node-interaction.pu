@@ -1,0 +1,44 @@
+@startuml
+
+Participant Zookeeper
+Participant FrameworkActor
+Participant TaskActor
+Participant NodeActor
+
+Zookeeper -> TaskActor: Update config to add mon nodes
+hnote over of TaskActor: Add pending task
+TaskActor -> NodeActor: Create
+TaskActor -> NodeActor: Send initial state
+NodeActor -> TaskActor: Persist
+TaskActor -> NodeActor: Success; send version
+TaskActor -> Zookeeper: Persist
+Zookeeper -> TaskActor: Persist okay
+hnote over TaskActor: Update persistence version
+TaskActor -> NodeActor: Send
+hnote over NodeActor: Detects transaction was persisted\nIntrospects state
+NodeActor -> TaskActor: Listen for resources
+hnote over NodeActor: Becomes waiting for offer\nwith timeout to re-request
+
+FrameworkActor -> TaskActor: Offer
+hnote over TaskActor: Look for reservations\nfor my frameworkId
+hnote over TaskActor: If reservation for\nunknown taskId\nreject
+hnote over TaskActor: If reservation for\nknown taskId\nbut wrong slave\nreject
+TaskActor -> NodeActor: Send resources
+hnote over NodeActor: Clear offer request
+NodeActor -> TaskActor: Accept & reserve
+hnote over TaskActor: Forms reservation ops to reserve resources\n and create persistent volume
+TaskActor -> FrameworkActor : Accept offer
+FrameworkActor -> TaskActor: Send reserved offer
+TaskActor -> NodeActor: Forward reserved offer
+NodeActor -> TaskActor: Set slaveId
+TaskActor -> NodeActor: Okay
+TaskActor -> Zookeeper: Persist
+hnote over NodeActor: At this point this node\nis forever locked to this\nslave
+Zookeeper -> TaskActor: Okay
+TaskActor -> NodeActor: Update state
+NodeActor -> TaskActor: Launch task\nwith reserved\noffer
+TaskActor -> FrameworkActor: Launch task
+FrameworkActor -> TaskActor: TaskStatus
+TaskActor -> NodeActor: Update state
+
+@enduml

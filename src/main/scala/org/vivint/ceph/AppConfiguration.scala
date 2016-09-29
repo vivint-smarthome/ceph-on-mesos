@@ -14,6 +14,10 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
     descr = "mesos principal as which to authenticate; can be set via MESOS_PRINCIPAL env var",
     default = Option(System.getenv("MESOS_PRINCIPAL")))
 
+  val role = opt[String]("role", 'r',
+    descr = "mesos role to use for reservations; can be set via MESOS_ROLE env var",
+    default = Option(System.getenv("MESOS_ROLE")))
+
   val secret = opt[String]("secret", 's',
     descr = "mesos principal as which to authenticate; can be set via MESOS_SECRET env var",
     default = Option(System.getenv("MESOS_SECRET")))
@@ -34,6 +38,7 @@ case class AppConfiguration(
   name: String,
   principal: Option[String],
   secret: Option[String],
+  role: String,
   zookeeper: String,
   offerTimeout: FiniteDuration)
 
@@ -45,6 +50,9 @@ object AppConfiguration {
       name = o.name(),
       principal = o.principal.toOption,
       secret = o.secret.toOption,
+      role = o.role.toOption.
+        orElse(o.principal.toOption).
+        getOrElse(Constants.DefaultRole),
       zookeeper = o.zookeeper(),
       offerTimeout = o.offerTimeout().seconds)
   }

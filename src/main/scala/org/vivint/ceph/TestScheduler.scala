@@ -12,7 +12,7 @@
 // class TestScheduler(private val implicitAcknowledgements: Boolean, private val executor: ExecutorInfo, private val totalTasks: Int)(implicit val injector: Injector)
 //      extends Scheduler {
 
-//   private val frameworkIdSetter = inject[FrameworkId]
+//   private val frameworkIdSetter = inject[FrameworkIdStore]
 //    override def registered(driver: SchedulerDriver, frameworkId: FrameworkID, masterInfo: MasterInfo): Unit = {
 //      frameworkIdSetter.set(frameworkId)
 //      println("Registered! ID = " + frameworkId.getValue)
@@ -64,6 +64,7 @@
 //          remainingCpus -= CPUS_PER_TASK
 //          remainingMem -= MEM_PER_TASK
 //        }
+//        task
 //        val offerIds = new java.util.ArrayList[OfferID]()
 //        offerIds.add(offer.getId)
 //        val operations = new java.util.ArrayList[Offer.Operation]()

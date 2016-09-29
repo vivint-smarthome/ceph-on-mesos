@@ -1,6 +1,7 @@
 package org.vivint.ceph.kvstore
 
-import akka.actor.{ ActorContext, Kill }
+import akka.actor.{ ActorContext, Kill, Cancellable }
+import akka.stream.scaladsl.Source
 import org.slf4j.LoggerFactory
 import scala.concurrent.Future
 
@@ -23,6 +24,11 @@ class CrashingKVStore(kvStore: KVStore)(implicit context: ActorContext)
   def delete(path: String): Future[Unit] = wrap(kvStore.delete(path))
   def get(path: String): Future[Option[Array[Byte]]] = wrap(kvStore.get(path))
   def children(path: String): Future[Seq[String]] = wrap(kvStore.children(path))
+  def watch(path: String, bufferSize: Int = 1): Source[Option[Array[Byte]], KVStore.CancellableWithResult] =
+    kvStore.watch(path).mapMaterializedValue { r =>
+      wrap(r.result)
+      r
+    }
 }
 
 object CrashingKVStore {

@@ -19,7 +19,7 @@ case class TaskStore(kvStore: KVStore) {
   import PlayJsonFormats._
   private val parsingFunction: PartialFunction[String, (String, (JsValue => CephNode))] = {
     case path if path.startsWith("mon:") =>
-      (path, _.as[MonNode])
+      (path, _.as[CephNode])
   }
 
   def getNodes: Future[Seq[CephNode]] = async {
@@ -38,25 +38,4 @@ case class TaskStore(kvStore: KVStore) {
       }.
       flatten
   }
-
-  def getTasks: Future[Seq[Protos.TaskStatus]] = async {
-    val paths = await(kvStore.children(tasksPath)).
-      filter(_.startsWith("task:")).
-      map { p => tasksPath + "/" + p }
-
-    val children = await(kvStore.getAll(paths))
-    children.flatten.map(Protos.TaskStatus.parseFrom)
-  }
-
-  def updateTask(taskStatus: Protos.TaskStatus): Future[Unit] = {
-    kvStore.set(
-      tasksPath + "/" + taskStatus.getTaskId.getValue,
-      taskStatus.toByteArray())
-  }
-
-  def deleteTaskId(taskId: String): Future[Unit] = {
-    kvStore.delete(tasksPath + "/" + taskId)
-  }
-
-
 }

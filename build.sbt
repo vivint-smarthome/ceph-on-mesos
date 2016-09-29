@@ -17,15 +17,19 @@ lazy val root = (project in file(".")).
     resolvers += "Mesosphere Public Repo" at "http://downloads.mesosphere.com/maven",
 
     libraryDependencies ++= Seq(
+      "com.github.kxbmap" %% "configs" % "0.4.3",
+      "org.scala-lang.modules" %% "scala-async" % "0.9.5",
       "org.apache.mesos" % "mesos" % mesosVersion,
       "com.typesafe.akka" %% "akka-actor" % akkaVersion,
+      "com.typesafe.akka" %% "akka-stream" % akkaVersion,
       "com.typesafe.play" %% "play-json" % playVersion,
       "com.typesafe.akka" %% "akka-http-experimental" % akkaVersion,
       "org.scaldi" %% "scaldi" % "0.5.7",
       "org.scalatest" %% "scalatest" % "3.0.0" % "test",
       "org.rogach" %% "scallop" % "2.0.2",
       "ch.qos.logback" % "logback-classic" % "1.1.7",
-      "org.apache.curator" % "curator-framework" % curatorVer
+      "org.apache.curator" % "curator-framework" % curatorVer,
+      "org.apache.curator" % "curator-recipes" % curatorVer
     )
   ).
   dependsOn(marathon)
