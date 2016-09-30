@@ -1,17 +1,16 @@
 package org.vivint.ceph
-import akka.Done
+
 import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, Props, Stash }
 import akka.pattern.pipe
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
 import java.nio.charset.StandardCharsets.UTF_8
-import java.util.UUID
 import java.util.concurrent.TimeoutException
 import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
+import lib.FutureHelpers.tSequence
 import org.apache.mesos.Protos._
 import org.slf4j.LoggerFactory
 import org.vivint.ceph.kvstore.{KVStore, CrashingKVStore}
-import scala.annotation.tailrec
 import scaldi.Injectable._
 import scaldi.Injector
 import scala.concurrent.duration._
@@ -26,73 +25,15 @@ object TaskActor {
   case object Reconciling extends State
   case object Ready extends State
 
-  def makeTaskId(role: String, cluster: String, id: UUID): String =
-    s"${role}#${cluster}#${id.toString}"
-  case class NodeState(
-    id: UUID,
-    cluster: String,
-    role: String,
-    version: Long = 0,
-    persistentState: Option[CephNode] = None,
-    behavior: Behavior,
-    persistentVersion: Long = 0,
-    wantingNewOffer: Boolean = false,
-    heldOffer: Option[Offer] = None,
-    offerMatchers: List[ResourceMatcher] = Nil,
-    taskStatus: Option[TaskStatus] = None
-  ) {
-    lazy val taskId = makeTaskId(role, cluster, id)
-    taskStatus.foreach { s =>
-      require(s.getTaskId.getValue == taskId, "Critical error - TaskStatus must match generated node state")
-    }
-  }
-  object NodeState {
-    def newNode(id: UUID, cluster: String, role: String, persistentState: Option[CephNode]): NodeState = {
-      val taskId = makeTaskId(role = role, cluster = cluster, id = id)
-      val taskStatus = for {
-        p <- persistentState
-        slaveId <- p.slaveId
-      } yield ProtoHelpers.newTaskStatus(taskId, slaveId)
-
-      NodeState(
-        id = id,
-        cluster = cluster,
-        role = role,
-        persistentState = persistentState,
-        behavior = InitializeLogic(taskId),
-        taskStatus = taskStatus)
-    }
-
-    def forRole(role: String): NodeState = {
-      newNode(
-        id = UUID.randomUUID,
-        cluster = Constants.DefaultCluster,
-        role = role,
-        persistentState = None)
-    }
-
-
-    def fromState(state: CephNode): NodeState = {
-      newNode(
-        id = state.id,
-        cluster = state.cluster,
-        role = state.role,
-        persistentState = Some(state))
-    }
-  }
-
-
-
-  // case class Data(
-  //   nodes: Map[String, NodeState] = Map.empty,
-  //   pendingReconcile: Set[String] = Set.empty,
-  //   deploymentConfig: Option[DeploymentConfig] = None
-  // )
-
-  case class InitialState(nodes: Seq[CephNode], frameworkId: FrameworkID)
+  case class InitialState(
+    nodes: Seq[CephNode],
+    frameworkId: FrameworkID,
+    secrets: ClusterSecrets,
+    config: Option[DeploymentConfig])
   case class ConfigUpdate(deploymentConfig: Option[DeploymentConfig])
   case class NodeTimer(taskId: String, payload: Any)
   case class PersistSuccess(taskId: String, version: Long)
+  case class NodeUpdated(previousVersion: CephNode, nextVersion: CephNode)
 
   val log = LoggerFactory.getLogger(getClass)
   val configParsingFlow = Flow[Option[Array[Byte]]].
@@ -119,15 +60,16 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   val frameworkIdStore = inject[FrameworkIdStore]
   import ProtoHelpers._
   var frameworkId : String = _
+  implicit var behaviorSet: NodeBehavior = _
 
   var nodes: Map[String, NodeState] = Map.empty
-  var deploymentConfig: Option[DeploymentConfig] = None
+  var deploymentConfig: DeploymentConfig = _
 
   val config = inject[AppConfiguration]
 
-
-  val (configStream, result) = kvStore.watch("config.json").
+  val ((configStream, deployConfigF), result) = kvStore.watch("config.json").
     via(configParsingFlow).
+    alsoToMat(Sink.head)(Keep.both).
     map(ConfigUpdate).
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
@@ -140,9 +82,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   override def preStart(): Unit = {
     import context.dispatcher
-    taskStore.getNodes.
-      zip(frameworkIdStore.get).
-      map(InitialState.tupled).pipeTo(self)
+
+    tSequence(
+      taskStore.getNodes,
+      frameworkIdStore.get,
+      ClusterSecretStore.createOrGenerateSecrets(kvStore),
+      deployConfigF
+    ).
+      map(InitialState.tupled).
+      pipeTo(self)
   }
 
   override def postStop(): Unit = {
@@ -199,19 +147,24 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   final def initializeBehavior(node: NodeState): NodeState = {
-    processDirective(node, node.behavior.initialize(node, nodes))
+    processDirective(node,
+      node.behavior.initialize(node, nodes))
   }
 
   def receive = {
-    case InitialState(persistentNodeStates, fId) =>
+    case InitialState(persistentNodeStates, fId, secrets, Some(_deploymentConfig)) =>
+      deploymentConfig = _deploymentConfig
       frameworkId = fId.getValue
       val newNodes = persistentNodeStates.map { p =>
         initializeBehavior(NodeState.fromState(p))
       }
       nodes = newNodes.map { node => node.taskId -> node }(breakOut)
+      behaviorSet = new NodeBehavior(secrets, { () => deploymentConfig })
 
       unstashAll()
       startReconciliation()
+    case InitialState(_, _, _, None) =>
+      throw new RuntimeException("Refusing to start task actor due to missing / unparsable deployment config")
     case _ =>
       stash()
   }
@@ -296,9 +249,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     case FrameworkActor.Connected =>
       startReconciliation()
 
-    case ConfigUpdate(newCfg) =>
+    case ConfigUpdate(Some(newCfg)) =>
       deploymentConfig = newCfg
       applyConfiguration()
+    case ConfigUpdate(None) =>
+      throw new RuntimeException("Missing deployment config. Crashing task actor.")
     case NodeTimer(taskId, payload) =>
       nodes.get(taskId) foreach { node =>
         updateNode(
@@ -317,9 +272,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
 
-  def applyConfiguration(): Unit = deploymentConfig foreach { cfg =>
+  def applyConfiguration(): Unit = {
     val monTasks = nodes.values.filter ( _.role == "mon") // TODO introduce constant
-    val newMonitorCount = Math.max(0, cfg.mon.count - monTasks.size)
+    val newMonitorCount = Math.max(0, deploymentConfig.mon.count - monTasks.size)
     val newMonitors = Stream.
       continually { NodeState.forRole("mon") }.
       map(initializeBehavior).
@@ -337,14 +292,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         val volume = PersistentVolume.apply(
           "state",
           PersistentVolumeInfo(
-            cfg.mon.disk,
-            `type` = cfg.mon.diskType),
+            deploymentConfig.mon.disk,
+            `type` = deploymentConfig.mon.diskType),
           Volume.Mode.RW)
 
         // TODO - if matching reserved resources set matchers appropriately
         val matchers = List(
-          new ScalarResourceMatcher(protos.Resource.CPUS, cfg.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
-          new ScalarResourceMatcher(protos.Resource.MEM, cfg.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
+          new ScalarResourceMatcher(protos.Resource.CPUS, deploymentConfig.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
+          new ScalarResourceMatcher(protos.Resource.MEM, deploymentConfig.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
           new DiskResourceMatcher(selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
           new lib.SinglePortMatcher(selector))
         nodes = nodes.updated(taskId, node.copy(offerMatchers = matchers))

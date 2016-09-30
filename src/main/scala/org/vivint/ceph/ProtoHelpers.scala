@@ -1,5 +1,6 @@
 package org.vivint.ceph
 import org.apache.mesos.Protos._
+import scala.collection.immutable.NumericRange
 import scala.concurrent.duration._
 import scala.collection.JavaConversions._
 import scala.collection.breakOut
@@ -13,13 +14,13 @@ object ProtoHelpers {
     b.build
   }
 
-  def newRanges(ranges: List[(Long, Long)]): Value.Ranges = {
+  def newRanges(ranges: Iterable[NumericRange.Inclusive[Long]]): Value.Ranges = {
     val b = Value.Ranges.newBuilder
-    ranges.foreach { case (start, end) =>
+    ranges.foreach { r =>
       b.addRange(
         Value.Range.newBuilder.
-          setBegin(start).
-          setEnd(end))
+          setBegin(r.min).
+          setEnd(r.max))
     }
     b.build
   }
@@ -30,9 +31,34 @@ object ProtoHelpers {
       setSlaveId(SlaveID.newBuilder.setValue(slaveId)).
       build
 
+  implicit class RichOffer(offer: Offer) {
+    def resources =
+      offer.getResourcesList.toList
+
+    def slaveId: Option[String] =
+      if (offer.hasSlaveId)
+        Some(offer.getSlaveId.getValue)
+      else
+        None
+
+    def hostname: Option[String] =
+      if (offer.hasHostname)
+        Some(offer.getHostname)
+      else
+        None
+  }
+
   implicit class RichResource(resource: Resource) {
     def reservation =
       if (resource.hasReservation) Some(resource.getReservation) else None
+
+    def ranges: List[NumericRange.Inclusive[Long]] =
+      if (resource.hasRanges) {
+        resource.getRanges.getRangeList.toList.map { r =>
+          NumericRange.inclusive(r.getBegin, r.getEnd, 1)
+        }
+      } else
+        Nil
   }
 
   implicit class RichLabels(labels: Labels) {

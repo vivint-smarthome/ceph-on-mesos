@@ -1,6 +1,7 @@
 package org.vivint.ceph
 
 import akka.actor.{ ActorRef, ActorSystem, Props }
+import java.net.InetAddress
 import org.apache.curator.framework.{ CuratorFramework, CuratorFrameworkFactory }
 import org.apache.mesos.MesosSchedulerDriver
 import org.apache.mesos.Protos._
@@ -41,6 +42,11 @@ class Universe(args: List[String]) extends Configuration(args) with Module with 
     system.actorOf(
       Props(new kvstore.ZookeeperActor).withDispatcher("zookeeper-dispatcher"),
       "zookeeper-actor")
+  }
+
+  bind [String => String] identifiedBy 'ipResolver to { InetAddress.
+    getByName(_: String).
+    getHostAddress
   }
 
   bind [KVStore] to (new kvstore.ZookeeperStore)

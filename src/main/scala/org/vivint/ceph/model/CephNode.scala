@@ -2,7 +2,8 @@ package org.vivint.ceph.model
 
 import java.util.UUID
 
-case class ServiceLocation(slaveId: String, address: String, port: String)
+case class ServiceLocation(slaveId: String, hostname: String, ip: String, port: Int)
+
 case class CephNode(
   id: UUID,
   cluster: String,

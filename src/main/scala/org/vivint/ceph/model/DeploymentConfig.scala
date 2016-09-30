@@ -1,7 +1,7 @@
 package org.vivint.ceph.model
 
 import com.typesafe.config.{ Config, ConfigFactory }
-import configs.{ ConfigError, FromString, Result }
+import configs.FromString
 import mesosphere.marathon.state.DiskType
 import configs.syntax._
 
@@ -21,7 +21,8 @@ case class OSDDeploymentConfig(
   diskType: DiskType,
   disk: Long,
   maxSize: Option[Long],
-  pathConstraint: Option[String]
+  pathConstraint: Option[String],
+  journalSize: Long
 )
 
 
@@ -42,6 +43,7 @@ mon {
 
 osd {
   diskType = root
+  journalSize = 100
 }
 """)
 

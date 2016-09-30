@@ -26,10 +26,19 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
     required = true,
     descr = "Location for zookeeper for ceph-framework to store it's state")
 
+  val publicNetwork = opt[String]("public-network",
+    required = true,
+    descr = "CIDR of the public network, in 0.0.0.0/24 format; can be set by PUBLIC_NETWORK",
+    default = Option(System.getenv("PUBLIC_NETWORK")) )
+
+  val clusterNetwork = opt[String]("cluster-network",
+    descr = "CIDR of the ceph network, in 0.0.0.0/24 format; can be set by CEPH_NETWORK. Defaults to public-network.",
+    default = Option(System.getenv("CLUSTER_NETWORK")) )
+
   val offerTimeout = opt[Int]("offer-timeout", 't',
     descr = "Duration in seconds after which offers timeout",
     required = false,
-    default = Option(10))
+    default = Option(30))
 
   verify()
 }
@@ -40,7 +49,10 @@ case class AppConfiguration(
   secret: Option[String],
   role: String,
   zookeeper: String,
-  offerTimeout: FiniteDuration)
+  offerTimeout: FiniteDuration,
+  publicNetwork: String,
+  clusterNetwork: String
+)
 
 object AppConfiguration {
   def fromArgs(args: List[String]): AppConfiguration = {
@@ -54,6 +66,8 @@ object AppConfiguration {
         orElse(o.principal.toOption).
         getOrElse(Constants.DefaultRole),
       zookeeper = o.zookeeper(),
-      offerTimeout = o.offerTimeout().seconds)
+      offerTimeout = o.offerTimeout().seconds,
+      publicNetwork = o.publicNetwork(),
+      clusterNetwork = o.clusterNetwork.toOption.getOrElse(o.publicNetwork()))
   }
 }

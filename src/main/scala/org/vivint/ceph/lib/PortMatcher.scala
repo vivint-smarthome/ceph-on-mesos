@@ -15,9 +15,9 @@ class SinglePortMatcher(resourceSelector: ResourceSelector) extends ResourceMatc
   def apply(offerId: String, resources: Iterable[Protos.Resource]): Iterable[MatchResult] = {
     (for {
       resource <- resources.filter(resourceSelector(_)).headOption
-      range <- resource.getRanges.getRangeList.headOption
+      range <- resource.ranges.headOption
     } yield {
-      val port = range.getBegin
+      val port = range.min
 
       // ReservationInfo
       List(
@@ -26,7 +26,7 @@ class SinglePortMatcher(resourceSelector: ResourceSelector) extends ResourceMatc
           List(Some(PortWithRole("main", port.toInt, resource.reservation))),
           List(
             resource.toBuilder().
-              setRanges(newRanges(List(port -> port)))
+              setRanges(newRanges(List(port to port)))
               .build)))
     }) getOrElse {
       List(
