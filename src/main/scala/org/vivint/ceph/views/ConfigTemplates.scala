@@ -12,7 +12,18 @@ import scaldi.Injector
 import scaldi.Injectable._
 import configs.syntax._
 
+object ConfigTemplates {
+  private[views] def renderSettings(cfg: ConfigObject): String = {
+    val b = new StringBuilder
+    cfg.keySet.toSeq.sorted.foreach { k =>
+      b.append(s"${k} = ${cfg(k).render}\n")
+    }
+    b.result
+  }
+}
+
 class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(implicit inj: Injector) {
+  import ConfigTemplates._
   val config = inject[AppConfiguration]
   val resolver = inject[String => String]('ipResolver)
 
@@ -31,16 +42,7 @@ class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(im
       port.getOrElse(6789))
   }
 
-  private def renderSettings(cfg: ConfigObject): String = {
-    val b = new StringBuilder
-    cfg.keySet.toSeq.sorted.foreach { k =>
-      b.append(s"${k} = ${cfg(k).render}\n")
-    }
-    b.result
-  }
-
-
-  def cephConf(leaderOffer: Option[Protos.Offer], cephConfig: CephConfig) = {
+  def cephConf(leaderOffer: Option[Protos.Offer], cephSettings: CephSettings) = {
     val monitors = leaderOffer.map(o => List(deriveLocation(o))).getOrElse(monIps)
     s"""
 [global]
@@ -53,22 +55,22 @@ auth service required = cephx
 auth client required = cephx
 public network = ${config.publicNetwork}
 cluster network = ${config.clusterNetwork}
-${renderSettings(cephConfig.settings.global)}
+${renderSettings(cephSettings.global)}
 
 [auth]
-${renderSettings(cephConfig.settings.auth)}
+${renderSettings(cephSettings.auth)}
 
 [mon]
-${renderSettings(cephConfig.settings.mon)}
+${renderSettings(cephSettings.mon)}
 
 [osd]
-${renderSettings(cephConfig.settings.osd)}
+${renderSettings(cephSettings.osd)}
 
 [client]
-${renderSettings(cephConfig.settings.client)}
+${renderSettings(cephSettings.client)}
 
 [mds]
-${renderSettings(cephConfig.settings.mds)}
+${renderSettings(cephSettings.mds)}
 """
   }
 }
