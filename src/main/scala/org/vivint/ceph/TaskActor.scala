@@ -4,7 +4,6 @@ import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FS
 import akka.pattern.pipe
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
-import java.nio.charset.StandardCharsets.UTF_8
 import java.util.concurrent.TimeoutException
 import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
 import lib.FutureHelpers.tSequence
@@ -29,32 +28,19 @@ object TaskActor {
     nodes: Seq[CephNode],
     frameworkId: FrameworkID,
     secrets: ClusterSecrets,
-    config: Option[CephConfig])
+    config: CephConfig)
   case class ConfigUpdate(deploymentConfig: Option[CephConfig])
   case class NodeTimer(taskId: String, payload: Any)
   case class PersistSuccess(taskId: String, version: Long)
   case class NodeUpdated(previousVersion: CephNode, nextVersion: CephNode)
 
   val log = LoggerFactory.getLogger(getClass)
-  val configParsingFlow = Flow[Option[Array[Byte]]].
-    map {
-      case Some(bytes) =>
-        try Some(CephConfigHelper.parse(new String(bytes, UTF_8)))
-        catch { case ex: Throwable =>
-          log.error("Error parsing configuration. Task actor will remain idle", ex)
-          None
-        }
-      case None =>
-        log.error("No configuration detected.")
-        None
-    }
 }
 
 class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
   import TaskActor._
   val kvStore = CrashingKVStore(inject[KVStore])
   val taskStore = TaskStore(kvStore)
-  val frameworkStore = TaskStore(kvStore)
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
   implicit val materializer = ActorMaterializer()
   val frameworkIdStore = inject[FrameworkIdStore]
@@ -66,10 +52,16 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   var cephConfig: CephConfig = _
 
   val config = inject[AppConfiguration]
+  val configStore = ConfigStore(kvStore)
 
-  val ((configStream, deployConfigF), result) = kvStore.watch("config.json").
-    via(configParsingFlow).
-    alsoToMat(Sink.head)(Keep.both).
+  val getFirstConfigUpdate =
+    Flow[Option[CephConfig]].
+      collect { case Some(cfg) => cfg }.
+      toMat(Sink.head)(Keep.right)
+
+  val ((configStream, deployConfigF), result) =
+    configStore.stream.
+    alsoToMat(getFirstConfigUpdate)(Keep.both).
     map(ConfigUpdate).
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
@@ -82,6 +74,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   override def preStart(): Unit = {
     import context.dispatcher
+
+    configStore.storeConfigIfNotExist()
 
     tSequence(
       taskStore.getNodes,
@@ -152,7 +146,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def receive = {
-    case InitialState(persistentNodeStates, fId, secrets, Some(_cephConfig)) =>
+    case InitialState(persistentNodeStates, fId, secrets, _cephConfig) =>
       cephConfig = _cephConfig
       frameworkId = fId.getValue
       val newNodes = persistentNodeStates.map { p =>
@@ -163,8 +157,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
       unstashAll()
       startReconciliation()
-    case InitialState(_, _, _, None) =>
-      throw new RuntimeException("Refusing to start task actor due to missing / unparsable ceph config")
     case _ =>
       stash()
   }
