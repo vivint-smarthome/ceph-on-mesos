@@ -29,8 +29,8 @@ object TaskActor {
     nodes: Seq[CephNode],
     frameworkId: FrameworkID,
     secrets: ClusterSecrets,
-    config: Option[DeploymentConfig])
-  case class ConfigUpdate(deploymentConfig: Option[DeploymentConfig])
+    config: Option[CephConfig])
+  case class ConfigUpdate(deploymentConfig: Option[CephConfig])
   case class NodeTimer(taskId: String, payload: Any)
   case class PersistSuccess(taskId: String, version: Long)
   case class NodeUpdated(previousVersion: CephNode, nextVersion: CephNode)
@@ -39,7 +39,7 @@ object TaskActor {
   val configParsingFlow = Flow[Option[Array[Byte]]].
     map {
       case Some(bytes) =>
-        try Some(DeploymentConfigHelper.parse(new String(bytes, UTF_8)))
+        try Some(CephConfigHelper.parse(new String(bytes, UTF_8)))
         catch { case ex: Throwable =>
           log.error("Error parsing configuration. Task actor will remain idle", ex)
           None
@@ -63,7 +63,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   implicit var behaviorSet: NodeBehavior = _
 
   var nodes: Map[String, NodeState] = Map.empty
-  var deploymentConfig: DeploymentConfig = _
+  var cephConfig: CephConfig = _
 
   val config = inject[AppConfiguration]
 
@@ -152,19 +152,19 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def receive = {
-    case InitialState(persistentNodeStates, fId, secrets, Some(_deploymentConfig)) =>
-      deploymentConfig = _deploymentConfig
+    case InitialState(persistentNodeStates, fId, secrets, Some(_cephConfig)) =>
+      cephConfig = _cephConfig
       frameworkId = fId.getValue
       val newNodes = persistentNodeStates.map { p =>
         initializeBehavior(NodeState.fromState(p))
       }
       nodes = newNodes.map { node => node.taskId -> node }(breakOut)
-      behaviorSet = new NodeBehavior(secrets, { () => deploymentConfig })
+      behaviorSet = new NodeBehavior(secrets, { () => cephConfig })
 
       unstashAll()
       startReconciliation()
     case InitialState(_, _, _, None) =>
-      throw new RuntimeException("Refusing to start task actor due to missing / unparsable deployment config")
+      throw new RuntimeException("Refusing to start task actor due to missing / unparsable ceph config")
     case _ =>
       stash()
   }
@@ -250,10 +250,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       startReconciliation()
 
     case ConfigUpdate(Some(newCfg)) =>
-      deploymentConfig = newCfg
+      cephConfig = newCfg
       applyConfiguration()
     case ConfigUpdate(None) =>
-      throw new RuntimeException("Missing deployment config. Crashing task actor.")
+      throw new RuntimeException("Missing ceph config. Crashing task actor.")
     case NodeTimer(taskId, payload) =>
       nodes.get(taskId) foreach { node =>
         updateNode(
@@ -274,7 +274,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   def applyConfiguration(): Unit = {
     val monTasks = nodes.values.filter ( _.role == "mon") // TODO introduce constant
-    val newMonitorCount = Math.max(0, deploymentConfig.mon.count - monTasks.size)
+    val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
     val newMonitors = Stream.
       continually { NodeState.forRole("mon") }.
       map(initializeBehavior).
@@ -292,16 +292,20 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         val volume = PersistentVolume.apply(
           "state",
           PersistentVolumeInfo(
-            deploymentConfig.mon.disk,
-            `type` = deploymentConfig.mon.diskType),
+            cephConfig.deployment.mon.disk,
+            `type` = cephConfig.deployment.mon.disk_type),
           Volume.Mode.RW)
 
         // TODO - if matching reserved resources set matchers appropriately
         val matchers = List(
-          new ScalarResourceMatcher(protos.Resource.CPUS, deploymentConfig.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
-          new ScalarResourceMatcher(protos.Resource.MEM, deploymentConfig.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
-          new DiskResourceMatcher(selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
-          new lib.SinglePortMatcher(selector))
+          new ScalarResourceMatcher(
+            protos.Resource.CPUS, cephConfig.deployment.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
+          new ScalarResourceMatcher(
+            protos.Resource.MEM, cephConfig.deployment.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
+          new DiskResourceMatcher(
+            selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
+          new lib.SinglePortMatcher(
+            selector))
         nodes = nodes.updated(taskId, node.copy(offerMatchers = matchers))
       }
     }

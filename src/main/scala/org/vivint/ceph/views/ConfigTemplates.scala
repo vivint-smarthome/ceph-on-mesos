@@ -1,13 +1,16 @@
 package org.vivint.ceph
 package views
 
+import com.typesafe.config.ConfigObject
 import java.net.{ Inet4Address, InetAddress }
 import model._
 import org.apache.mesos.Protos
 import ProtoHelpers._
 import mesosphere.mesos.protos.Resource
+import scala.collection.JavaConversions._
 import scaldi.Injector
 import scaldi.Injectable._
+import configs.syntax._
 
 class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(implicit inj: Injector) {
   val config = inject[AppConfiguration]
@@ -28,7 +31,16 @@ class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(im
       port.getOrElse(6789))
   }
 
-  def cephConf(leaderOffer: Option[Protos.Offer], deploymentConfig: DeploymentConfig) = {
+  private def renderSettings(cfg: ConfigObject): String = {
+    val b = new StringBuilder
+    cfg.keySet.toSeq.sorted.foreach { k =>
+      b.append(s"${k} = ${cfg(k).render}\n")
+    }
+    b.result
+  }
+
+
+  def cephConf(leaderOffer: Option[Protos.Offer], cephConfig: CephConfig) = {
     val monitors = leaderOffer.map(o => List(deriveLocation(o))).getOrElse(monIps)
     s"""
 [global]
@@ -41,10 +53,22 @@ auth service required = cephx
 auth client required = cephx
 public network = ${config.publicNetwork}
 cluster network = ${config.clusterNetwork}
-osd journal size = ${deploymentConfig.osd.journalSize}
+${renderSettings(cephConfig.settings.global)}
+
+[auth]
+${renderSettings(cephConfig.settings.auth)}
+
+[mon]
+${renderSettings(cephConfig.settings.mon)}
+
+[osd]
+${renderSettings(cephConfig.settings.osd)}
+
+[client]
+${renderSettings(cephConfig.settings.client)}
+
+[mds]
+${renderSettings(cephConfig.settings.mds)}
 """
-
   }
-
-  // def
 }

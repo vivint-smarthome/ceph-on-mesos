@@ -4,14 +4,14 @@ import akka.actor.{ ActorContext, Cancellable }
 import java.util.concurrent.atomic.AtomicInteger
 import mesosphere.mesos.protos.TaskStatus
 import org.apache.mesos.Protos.Offer
-import org.vivint.ceph.model.{ CephNode, DeploymentConfig, NodeState }
+import org.vivint.ceph.model.{ CephNode, CephConfig, NodeState }
 import NodeFSM._
 import Behavior._
 import scala.annotation.tailrec
 import scala.concurrent.duration._
 import model.ClusterSecrets
 
-class NodeBehavior(secrets: ClusterSecrets, deploymentConfig: () => DeploymentConfig) extends BehaviorSet {
+class NodeBehavior(secrets: ClusterSecrets, deploymentConfig: () => CephConfig) extends BehaviorSet {
   object SharedLogic extends Directives {
     def decideWhatsNext(state: NodeState, fullState: Map[String, NodeState]): Directive = {
       state.persistentState match {
