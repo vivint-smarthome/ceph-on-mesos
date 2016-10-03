@@ -75,7 +75,6 @@ settings {
 
   implicit val readDiskType: FromString[DiskType] =
     FromString.fromTry { str =>
-      println(s"reading los type ${str}")
       DiskType.all.
         find(_.toString == str).
         getOrElse {

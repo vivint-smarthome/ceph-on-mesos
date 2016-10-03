@@ -2,8 +2,8 @@ package org.vivint.ceph
 
 import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, Props, Stash }
 import akka.pattern.pipe
-import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{ Flow, Keep, Sink }
+import akka.stream.{ ActorMaterializer, OverflowStrategy }
+import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
 import java.util.concurrent.TimeoutException
 import lib.FutureHelpers.tSequence
 import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
@@ -64,12 +64,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       collect { case Some(cfg) => cfg }.
       toMat(Sink.head)(Keep.right)
 
-  val ((configStream, deployConfigF), result) =
-    configStore.stream.
+  val ((configStream, deployConfigF), result) = configStore.stream.
+    dropWhile(_.isEmpty). // Handles initial bootstrap
     alsoToMat(getFirstConfigUpdate)(Keep.both).
     map(ConfigUpdate).
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
+
+  val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail)
 
   result.
     onFailure { case ex: Throwable =>
@@ -168,9 +170,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def receive = {
-    case InitialState(persistentNodeStates, fId, secrets, _cephConfig) =>
-      cephConfig = _cephConfig
-      frameworkId = fId.getValue
+    case iState @ InitialState(persistentNodeStates, fId, secrets, _cephConfig) =>
+      log.info("InitialState: persistentNodeStates count = {}, fId = {}", persistentNodeStates.length, fId)
+        cephConfig = _cephConfig
+        frameworkId = fId.getValue
       val newNodes = persistentNodeStates.map { p =>
         initializeBehavior(NodeState.fromState(p))
       }
@@ -191,9 +194,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     reconciliationTimer.cancel() // clear out any existing timers
     val taskIdsForReconciliation: Set[String] =
       nodes.values.flatMap { _.taskStatus.map(_.getTaskId.getValue) }(breakOut)
-    if (taskIdsForReconciliation.isEmpty)
+    if (taskIdsForReconciliation.isEmpty) {
+      log.info("Skipping reconciliation; no known tasks to reconcile")
       context.become(ready)
-    else {
+    } else {
+      log.info("Beginning reconciliation")
       reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
       frameworkActor ! FrameworkActor.Reconcile(
         nodes.values.flatMap(_.taskStatus)(breakOut))
@@ -310,34 +315,36 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     Future.sequence(operations).map(_.flatten)
   }
 
-  def ready: Receive = {
-    case FrameworkActor.ResourceOffers(offers) =>
-      offers.foreach { offer =>
-        import context.dispatcher
-        handleOffer(offer).
-          map { ops =>
-            if (ops.isEmpty)
-              FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
-            else
-              FrameworkActor.AcceptOffer(offer.getId, ops)
-          }.
-          pipeTo(frameworkActor)
-      }
-      // val offerOpsFuture = offers.map(handleOffer)
-      // val rejectedOffers =
-      // rejectedOffers.foreach { o =>
-      //   frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(30.seconds))
-      // }
+  def ready: Receive = (
+    {
+      case FrameworkActor.ResourceOffers(offers) =>
+        offers.foreach { offer =>
+          import context.dispatcher
+          handleOffer(offer).
+            map { ops =>
+              if (ops.isEmpty)
+                FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
+              else
+                FrameworkActor.AcceptOffer(offer.getId, ops)
+            }.
+            pipeTo(frameworkActor)
+        }
+        // val offerOpsFuture = offers.map(handleOffer)
+        // val rejectedOffers =
+        // rejectedOffers.foreach { o =>
+        //   frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(30.seconds))
+        // }
 
-      // TODO
-      // if reservation: known? route to task actor; unknown? destroy / free...
-      /* match resource, execute reservation and launch actor. If reserved resource doesn't get re-offered after a
-       period of time then crash. Watch for death and put actor back in to pending stage. Task must store
-       reservationId, which must be unique per reservation */
-      // stay
+        // TODO
+        // if reservation: known? route to task actor; unknown? destroy / free...
+        /* match resource, execute reservation and launch actor. If reserved resource doesn't get re-offered after a
+         period of time then crash. Watch for death and put actor back in to pending stage. Task must store
+         reservationId, which must be unique per reservation */
+        // stay
 
-  }
-
+    }: Receive
+  ).
+    orElse(default)
 
   def default: Receive = {
     case FrameworkActor.Connected =>
@@ -347,7 +354,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       cephConfig = newCfg
       applyConfiguration()
     case ConfigUpdate(None) =>
-      throw new RuntimeException("Missing ceph config. Crashing task actor.")
+      log.warning("Ceph config went missing / unparseable. Changes not applied")
     case NodeTimer(taskId, payload) =>
       nodes.get(taskId) foreach { node =>
         updateNode(
@@ -390,7 +397,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     val newMonitors = Stream.
       continually { NodeState.forRole("mon") }.
       map(initializeBehavior).
-      take(newMonitorCount)
+      take(newMonitorCount).
+      toList
+    log.info("added {} new monitors as a result of config update", newMonitors.length)
 
     nodes = nodes ++ newMonitors.map { m => m.taskId -> m }
 

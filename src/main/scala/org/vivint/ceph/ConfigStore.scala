@@ -8,7 +8,7 @@ import scala.concurrent.{ ExecutionContext, Future }
 
 case class ConfigStore(kvStore: kvstore.KVStore) {
   private val log = LoggerFactory.getLogger(getClass)
-  val configPath = "config.json"
+  val configPath = "ceph.conf"
 
   def storeConfigIfNotExist(): Future[Unit] = {
     import ExecutionContext.Implicits.global
@@ -20,7 +20,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
         val byteArray =
           try { IOUtils.toByteArray(f) }
           finally { f.close() }
-        kvStore.set(configPath, byteArray)
+        kvStore.createAndSet(configPath, byteArray)
       case Some(_) =>
         Future.successful(())
     }

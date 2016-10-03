@@ -3,7 +3,7 @@ val mesosVersion = "1.0.0"
 val curatorVer = "2.11.0"
 val playVersion = "2.5.8"
 val logbackVersion = "1.1.7"
-
+val zookeeperVersion = "3.4.9"
 val commonSettings = Seq(
   scalaVersion := "2.11.8"
 )
@@ -24,14 +24,17 @@ lazy val root = (project in file(".")).
       "org.apache.mesos" % "mesos" % mesosVersion,
       "com.typesafe.akka" %% "akka-actor" % akkaVersion,
       "com.typesafe.akka" %% "akka-stream" % akkaVersion,
+      "com.typesafe.akka" %% "akka-slf4j" % akkaVersion,
       "com.typesafe.play" %% "play-json" % playVersion,
       "com.typesafe.akka" %% "akka-http-experimental" % akkaVersion,
+      "com.typesafe.akka" %% "akka-testkit" % akkaVersion,
       "org.scaldi" %% "scaldi" % "0.5.7",
       "org.scalatest" %% "scalatest" % "3.0.0" % "test",
       "org.rogach" %% "scallop" % "2.0.2",
       "ch.qos.logback" % "logback-classic" % "1.1.7",
-      "org.apache.curator" % "curator-framework" % curatorVer,
-      "org.apache.curator" % "curator-recipes" % curatorVer
+      ("org.apache.curator" % "curator-framework" % curatorVer),
+      "org.apache.curator" % "curator-recipes" % curatorVer,
+      ("org.apache.zookeeper" % "zookeeper" % zookeeperVersion).exclude("org.slf4j", "slf4j-log4j12")
     )
   ).
   dependsOn(marathon)
@@ -50,9 +53,10 @@ lazy val marathon = (project in file("marathon-submodule/")).
       "com.typesafe.play" %% "play-json" % playVersion,
       "ch.qos.logback" % "logback-core" % logbackVersion,
       "org.apache.curator" % "curator-framework" % curatorVer,
-      "com.twitter" %% "util-zk" % "6.34.0",
+      ("com.twitter" %% "util-zk" % "6.34.0").exclude("org.apache.zookeeper", "zookeeper"),
       "mesosphere" %% "mesos-utils" % "1.1.0-mesos-healthchecks",
-      "com.fasterxml.uuid" % "java-uuid-generator" % "3.1.4"
+      "com.fasterxml.uuid" % "java-uuid-generator" % "3.1.4",
+      ("org.apache.zookeeper" % "zookeeper" % zookeeperVersion).exclude("org.slf4j", "slf4j-log4j12")
     ),
     unmanagedSources in Compile ++= Seq(
       baseDirectory.value / "marathon/plugin-interface/src/main/scala/mesosphere/marathon/plugin/PathId.scala",
