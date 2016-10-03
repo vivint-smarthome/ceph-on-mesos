@@ -83,6 +83,7 @@ object Directives extends Directives
 
 trait Behavior extends Directives {
   private var initialized = false
+  def name = getClass.getSimpleName
   val actorContext: ActorContext
   private val timers = scala.collection.mutable.Map.empty[Int, Cancellable]
   case class BehaviorTimer(timerId: Int, id: Any)

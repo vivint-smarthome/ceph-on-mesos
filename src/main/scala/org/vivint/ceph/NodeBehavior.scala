@@ -40,7 +40,7 @@ class NodeBehavior(
       case Some(pState) =>
         if (pState.reservationConfirmed)
           transition(Running)
-        if (pState.slaveId.nonEmpty)
+        else if (pState.slaveId.nonEmpty)
           transition(WaitForReservation)
         else
           transition(Matching)
@@ -132,7 +132,9 @@ class NodeBehavior(
           if (pendingOffer.offer.resources.exists(_.hasReservation)) {
             val newState = state.inferPersistedState.copy(
               reservationConfirmed = true)
+            println(s"newState = ${newState}")
             persist(newState).
+              andAlso(hold(pendingOffer, matchResult)).
               withTransition(WaitForSync(decideWhatsNext))
           } else {
             hold(pendingOffer, matchResult).withTransition(Matching)

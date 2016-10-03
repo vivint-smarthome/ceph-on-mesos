@@ -4,25 +4,29 @@ import akka.actor.{ ActorRef, ActorSystem, Props }
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
 import akka.testkit.ImplicitSender
+import akka.testkit.TestKit
 import com.typesafe.config.{ Config, ConfigFactory, ConfigRenderOptions }
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import org.apache.commons.io.FileUtils
-import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
 import org.apache.mesos.Protos
-import akka.testkit.TestKit
+import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
+import mesosphere.mesos.protos.Resource.{CPUS, MEM, PORTS, DISK}
 import org.vivint.ceph.kvstore.KVStore
 import org.vivint.ceph.views.ConfigTemplates
-import scala.concurrent.{ Await, Awaitable, ExecutionContext }
-import scaldi.Module
-import scaldi.Injectable._
+import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 import scala.concurrent.duration._
+import scala.concurrent.{ Await, Awaitable, ExecutionContext }
+import scaldi.Injectable._
+import scaldi.Module
 
 class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     with ImplicitSender with FunSpecLike with Matchers with BeforeAndAfterAll {
 
   val idx = new AtomicInteger()
   val fileStorePath = new File("tmp/test-store")
+  import ProtoHelpers._
 
   def await[T](f: Awaitable[T], duration: FiniteDuration = 5.seconds) = {
     Await.result(f, duration)
@@ -64,8 +68,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     val taskActor = inject[ActorRef](classOf[TaskActor])
 
-    inject[FrameworkIdStore].set(
-      Protos.FrameworkID.newBuilder.setValue("19c21851-0b06-4f05-bde8-e71450ff2030").build)
+    inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
 
     val kvStore = inject[KVStore]
     val configStore = new ConfigStore(inject[KVStore])
@@ -94,8 +97,24 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         runWith(storeConfig)
     }
 
-    val message = receiveOne(5.seconds)
-    println(s"I received ${message}")
+    receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
+
+    val offer = MesosTestHelper.makeBasicOffer().build
+
+    // Send an offer!
+    taskActor ! FrameworkActor.ResourceOffers(List(offer))
+
+    val offerResponse = (receiveOne(5.seconds)).asInstanceOf[FrameworkActor.AcceptOffer]
+    offerResponse.offerId shouldBe offer.getId
+    val List(reserve, create) = offerResponse.operations
+    reserve.hasReserve shouldBe (true)
+    create.hasCreate shouldBe (true)
+
+    val reservedOffer = MesosTestHelper.mergeReservation(
+      offer, reserve.getReserve, create.getCreate)
+    taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+
+    println(receiveOne(5.seconds))
     Thread.sleep(5000)
   }
 

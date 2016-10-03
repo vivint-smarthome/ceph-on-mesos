@@ -93,6 +93,40 @@ object ProtoHelpers {
     Value.Scalar.newBuilder.setValue(amount).build
   }
 
+  def newOfferId(id: String): OfferID = {
+    OfferID.newBuilder.setValue(id).build
+  }
+
+  def newFrameworkId(id: String): FrameworkID = {
+    FrameworkID.newBuilder.setValue(id).build
+  }
+
+  def newSlaveId(id: String): SlaveID = {
+    SlaveID.newBuilder.setValue(id).build
+  }
+
+
+  def newRangesResource(name: String, ranges: Iterable[NumericRange.Inclusive[Long]], role: String): Resource =
+    Resource.newBuilder.
+      setName(name).
+      setRole(role).
+      setType(Value.Type.RANGES).
+      setRanges(newRanges(ranges)).
+      build
+
+
+  def newScalarResource(name: String, amount: Double, role: String = "*",
+    reservation: Option[Resource.ReservationInfo] = None, disk: Option[Resource.DiskInfo] = None): Resource = {
+    val b = Resource.newBuilder.
+      setName(name).
+      setScalar(newScalar(amount)).
+      setType(Value.Type.SCALAR).
+      setRole(role)
+    reservation.foreach(b.setReservation)
+    disk.foreach(b.setDisk)
+    b.build
+  }
+
   def newTaskStatus(taskId: String, slaveId: String): TaskStatus =
     TaskStatus.newBuilder.
       setTaskId(TaskID.newBuilder.setValue(taskId)).

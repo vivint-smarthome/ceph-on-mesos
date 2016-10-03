@@ -163,7 +163,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       case Some(nextBehaviorFactory) =>
         node.behavior.teardown()
         val nextBehavior = nextBehaviorFactory(node.taskId, context)
-        log.info("Transition node {} from {} to {}", node.taskId, node.behavior, nextBehavior)
+        log.info("node {}: Transition {} -> {}", node.taskId, node.behavior.name, nextBehavior.name)
         processHeldEvents(
           initializeBehavior(nodeAfterAction.copy(behavior = nextBehavior)))
 
@@ -173,7 +173,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   final def initializeBehavior(node: NodeState): NodeState = {
-    log.info("Initializing behavior {} for node {}", node.behavior, node.taskId)
+    log.info("node {}: Initializing behavior {}", node.taskId, node.behavior.name)
     processDirective(node,
       node.behavior.initialize(node, nodes))
   }
@@ -334,7 +334,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
               if (ops.isEmpty)
                 FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
               else
-                FrameworkActor.AcceptOffer(offer.getId, ops)
+                FrameworkActor.AcceptOffer(offer.getId, ops.toList)
             }.
             pipeTo(frameworkActor)
         }

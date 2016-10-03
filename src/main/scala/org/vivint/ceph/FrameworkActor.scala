@@ -174,7 +174,7 @@ object FrameworkActor {
   /* Mesos commands */
   sealed trait Command
   case class DeclineOffer(offerId: OfferID, refuseFor: Option[FiniteDuration] = None) extends Command
-  case class AcceptOffer(offerId: OfferID, operations: Iterable[Offer.Operation] = Nil,
+  case class AcceptOffer(offerId: OfferID, operations: Seq[Offer.Operation] = Nil,
     refuseFor: Option[FiniteDuration] = None) extends Command
   case class Reconcile(tasks: List[TaskStatus]) extends Command
   case object ReviveOffers extends Command
