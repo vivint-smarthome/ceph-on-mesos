@@ -115,6 +115,9 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
 
     case cmd: Command =>
       cmd match {
+        case ReviveOffers =>
+          driver.reviveOffers()
+
         /* commands */
         case DeclineOffer(offerId, refuseFor) =>
           processingOffer(offerId) {
@@ -174,6 +177,7 @@ object FrameworkActor {
   case class AcceptOffer(offerId: OfferID, operations: Iterable[Offer.Operation] = Nil,
     refuseFor: Option[FiniteDuration] = None) extends Command
   case class Reconcile(tasks: List[TaskStatus]) extends Command
+  case object ReviveOffers extends Command
 }
 
 

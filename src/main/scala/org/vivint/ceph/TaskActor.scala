@@ -2,7 +2,7 @@ package org.vivint.ceph
 
 import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, Props, Stash }
 import akka.pattern.pipe
-import akka.stream.{ ActorMaterializer, OverflowStrategy }
+import akka.stream.{ ActorMaterializer, OverflowStrategy, ThrottleMode }
 import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
 import java.util.concurrent.TimeoutException
 import lib.FutureHelpers.tSequence
@@ -71,13 +71,18 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
 
-  val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail)
-
   result.
     onFailure { case ex: Throwable =>
       log.error(ex, "Unexpected error in config stream")
       self ! Kill
     }(context.dispatcher)
+
+  val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail).
+    throttle(1, 5.seconds, 1, ThrottleMode.shaping).
+    to(Sink.foreach({ _ =>
+      frameworkActor ! FrameworkActor.ReviveOffers
+    })).
+    run
 
   override def preStart(): Unit = {
     import context.dispatcher
@@ -96,6 +101,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   override def postStop(): Unit = {
     configStream.cancel()
+    throttledRevives.complete()
   }
 
   final def processEvents(node: NodeState, events: List[NodeFSM.Event]): NodeState = events match {
@@ -140,6 +146,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             persistentState = Some(data))
         }
       case NodeFSM.WantOffers =>
+        throttledRevives.offer(())
         node.copy(
           wantingNewOffer = true,
           offerMatchers = calcMatchers(node))
@@ -156,6 +163,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       case Some(nextBehaviorFactory) =>
         node.behavior.teardown()
         val nextBehavior = nextBehaviorFactory(node.taskId, context)
+        log.info("Transition node {} from {} to {}", node.taskId, node.behavior, nextBehavior)
         processHeldEvents(
           initializeBehavior(nodeAfterAction.copy(behavior = nextBehavior)))
 
@@ -165,6 +173,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   final def initializeBehavior(node: NodeState): NodeState = {
+    log.info("Initializing behavior {} for node {}", node.behavior, node.taskId)
     processDirective(node,
       node.behavior.initialize(node, nodes))
   }
@@ -403,10 +412,17 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     nodes = nodes ++ newMonitors.map { m => m.taskId -> m }
 
+    var matchersUpdated = false
     nodes.foreach { case (taskId, node) =>
       if (node.wantingNewOffer) {
+        matchersUpdated = true
         nodes = nodes.updated(taskId, node.copy(offerMatchers = calcMatchers(node)))
       }
     }
+    if (matchersUpdated) {
+      log.info("matchers were updated. Scheduling revive")
+      throttledRevives.offer(())
+    }
+
   }
 }

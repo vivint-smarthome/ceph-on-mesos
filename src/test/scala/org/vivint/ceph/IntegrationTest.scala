@@ -94,6 +94,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         runWith(storeConfig)
     }
 
+    val message = receiveOne(5.seconds)
+    println(s"I received ${message}")
     Thread.sleep(5000)
   }
 
