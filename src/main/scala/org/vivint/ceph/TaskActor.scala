@@ -127,12 +127,16 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         }
         node.copy(heldOffer = Some((offer, resourceMatch)))
       case NodeFSM.Persist(data) =>
-        import context.dispatcher
-        val nextVersion = node.version + 1
-        taskStore.save(data).map(_ => PersistSuccess(node.taskId, nextVersion)) pipeTo self
-        node.copy(
-          version = nextVersion,
-          persistentState = Some(data))
+        if (node.persistentState == Some(data))
+          node
+        else {
+          import context.dispatcher
+          val nextVersion = node.version + 1
+          taskStore.save(data).map(_ => PersistSuccess(node.taskId, nextVersion)) pipeTo self
+          node.copy(
+            version = nextVersion,
+            persistentState = Some(data))
+        }
       case NodeFSM.WantOffers =>
         node.copy(
           wantingNewOffer = true,

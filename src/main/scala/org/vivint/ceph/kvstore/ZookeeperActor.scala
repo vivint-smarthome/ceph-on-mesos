@@ -17,11 +17,9 @@ import scaldi.Injectable._
 /** By serializing all requests in and out of Zookeeper we get linear consistency guarantees. IE an an async read
   * request that follows an async write is guaranteed to get the state of the async write */
 class ZookeeperActor(implicit injector: Injector) extends Actor with ActorLogging {
-  val framework = inject[AppConfiguration]
   import org.apache.curator.retry.ExponentialBackoffRetry
   private val retryPolicy = new ExponentialBackoffRetry(1000, 3)
   import ZookeeperActor._
-
 
   val appConfiguration = inject[AppConfiguration]
   val client = CuratorFrameworkFactory.builder.
@@ -49,6 +47,8 @@ object ZookeeperActor {
     private[kvstore] def apply(client: CuratorFramework): self.Response = {
       client.create.
         creatingParentsIfNeeded.
+        forPath(path, data)
+      client.setData.
         forPath(path, data)
     }
   }
@@ -118,34 +118,3 @@ object ZookeeperActor {
     }
   }
 }
-
-/*
-  /** Returns an Akka stream Source which emits the state of the Zookeeper node. A new listener is created for each
-    * materialization of this source. On buffer overflow (due to backpressure), old values are dropped to make room for
-    * new ones. The listener is closed when the stream is stopped.
-    */
-  def subscription(path: String, bufferSize: Int = 1): Source[Option[ByteString], Cancellable] = {
-    Source.queue[Option[ByteString]](bufferSize, OverflowStrategy.dropHead).
-      mapMaterializedValue { q =>
-        var _isCancelled = false
-        val l = new NodeCache(namespaceFramework, path)
-        l.getListenable.addListener(new NodeCacheListener {
-          override def nodeChanged(): Unit = {
-            val s = Option(l.getCurrentData).map { d => ByteString(d.getData) }
-            q.offer(s)
-          }
-        })
-        l.start()
-
-        q.watchCompletion().onComplete { _ =>
-          l.close()
-          _isCancelled = true
-        }(ExecutionContext.global)
-
-        new Cancellable {
-          def cancel(): Boolean = { q.complete(); true }
-          def isCancelled = _isCancelled
-        }
-      }
-  }
- */

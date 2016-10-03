@@ -16,10 +16,10 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
     kvStore.get(configPath).flatMap {
       case None =>
         import org.apache.commons.io.IOUtils
-        val byteArray = Array.empty[Byte]
-        IOUtils.readFully(
-          getClass.getResourceAsStream("/deployment-config.conf"),
-          byteArray)
+        val f = getClass.getResourceAsStream("/deployment-config.conf")
+        val byteArray =
+          try { IOUtils.toByteArray(f) }
+          finally { f.close() }
         kvStore.set(configPath, byteArray)
       case Some(_) =>
         Future.successful(())
