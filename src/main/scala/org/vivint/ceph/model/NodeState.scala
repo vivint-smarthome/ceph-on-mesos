@@ -15,16 +15,25 @@ case class NodeState(
   behavior: Behavior,
   persistentVersion: Long = 0,
   wantingNewOffer: Boolean = false,
-  heldOffer: Option[Offer] = None,
+  heldOffer: Option[(PendingOffer, Option[ResourceMatcher.ResourceMatch])] = None,
   offerMatchers: List[ResourceMatcher] = Nil,
   taskStatus: Option[TaskStatus] = None
 ) {
+  if (wantingNewOffer)
+    require(heldOffer.isEmpty, "cannot want offer and be holding an offer")
+  def readyForOffer =
+    wantingNewOffer && heldOffer.isEmpty && offerMatchers.nonEmpty
   lazy val taskId = NodeState.makeTaskId(role, cluster, id)
   taskStatus.foreach { s =>
     require(s.getTaskId.getValue == taskId, "Critical error - TaskStatus must match generated node state")
   }
-}
 
+  def inferPersistedState: CephNode = persistentState.getOrElse(
+    CephNode(
+      id = id,
+      cluster = cluster,
+      role = role))
+}
 
 object NodeState {
   def newNode(id: UUID, cluster: String, role: String, persistentState: Option[CephNode])(

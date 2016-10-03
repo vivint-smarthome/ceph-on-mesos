@@ -5,17 +5,21 @@ import akka.pattern.pipe
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
 import java.util.concurrent.TimeoutException
-import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
 import lib.FutureHelpers.tSequence
+import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
+import mesosphere.mesos.matcher._
+import mesosphere.mesos.protos
 import org.apache.mesos.Protos._
 import org.slf4j.LoggerFactory
 import org.vivint.ceph.kvstore.{KVStore, CrashingKVStore}
+import org.vivint.ceph.model._
+import scala.collection.breakOut
+import scala.collection.JavaConverters._
+import scala.collection.immutable.{Iterable, Seq}
+import scala.concurrent.Future
+import scala.concurrent.duration._
 import scaldi.Injectable._
 import scaldi.Injector
-import scala.concurrent.duration._
-import scala.collection.breakOut
-import org.vivint.ceph.model._
-import mesosphere.mesos.matcher.ResourceMatcher
 
 object TaskActor {
   sealed trait State
@@ -30,7 +34,7 @@ object TaskActor {
     secrets: ClusterSecrets,
     config: CephConfig)
   case class ConfigUpdate(deploymentConfig: Option[CephConfig])
-  case class NodeTimer(taskId: String, payload: Any)
+  case class NodeTimer(actions: String, payload: Any)
   case class PersistSuccess(taskId: String, version: Long)
   case class NodeUpdated(previousVersion: CephNode, nextVersion: CephNode)
 
@@ -41,6 +45,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   import TaskActor._
   val kvStore = CrashingKVStore(inject[KVStore])
   val taskStore = TaskStore(kvStore)
+  val offerOperations = inject[OfferOperations]
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
   implicit val materializer = ActorMaterializer()
   val frameworkIdStore = inject[FrameworkIdStore]
@@ -104,29 +109,42 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   final def processHeldEvents(node: NodeState): NodeState = {
     node.heldOffer match {
-      case Some(offer) =>
+      case Some((offer, resourceMatch)) =>
         processEvents(
           node.copy(heldOffer = None),
-          NodeFSM.MatchedOffer(offer) :: Nil)
+          NodeFSM.MatchedOffer(offer, resourceMatch) :: Nil)
       case None =>
         node
     }
   }
 
-  final def processDirective(node: NodeState, directive: NodeFSM.Directive): NodeState = {
-    val nodeAfterAction = directive.action match {
-      case Some(NodeFSM.Hold(offer)) =>
-        node.copy(heldOffer = Some(offer))
-      case Some(NodeFSM.Persist(data)) =>
+  final def processAction(node: NodeState, action: NodeFSM.Action): NodeState = {
+    action match {
+      case NodeFSM.Hold(offer, resourceMatch) =>
+        // Decline existing held offer
+        node.heldOffer.foreach {
+          case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
+        }
+        node.copy(heldOffer = Some((offer, resourceMatch)))
+      case NodeFSM.Persist(data) =>
         import context.dispatcher
         val nextVersion = node.version + 1
         taskStore.save(data).map(_ => PersistSuccess(node.taskId, nextVersion)) pipeTo self
         node.copy(
           version = nextVersion,
           persistentState = Some(data))
-      case None =>
+      case NodeFSM.WantOffers =>
+        node.copy(
+          wantingNewOffer = true,
+          offerMatchers = calcMatchers(node))
+      case NodeFSM.OfferResponse(pendingOffer, operations) =>
+        pendingOffer.resultingOperationsPromise.success(operations.toList)
         node
     }
+  }
+
+  final def processDirective(node: NodeState, directive: NodeFSM.Directive): NodeState = {
+    val nodeAfterAction = directive.action.foldLeft(node)(processAction)
 
     directive.transition match {
       case Some(nextBehaviorFactory) =>
@@ -153,7 +171,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         initializeBehavior(NodeState.fromState(p))
       }
       nodes = newNodes.map { node => node.taskId -> node }(breakOut)
-      behaviorSet = new NodeBehavior(secrets, { () => cephConfig })
+      behaviorSet = new NodeBehavior(secrets, { () => frameworkId }, { () => cephConfig })
 
       unstashAll()
       startReconciliation()
@@ -225,8 +243,88 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
+  /** Looking at reservation labels, routes the offer to the appropriate
+    *
+    */
+  def handleOffer(offer: Offer): Future[Iterable[Offer.Operation]] = {
+
+    val reservedGroupings = offer.resources.groupBy { r =>
+      r.reservation.
+        flatMap(_.labels).
+        map { labels =>
+          (labels.get(Constants.TaskIdLabel), labels.get(Constants.FrameworkIdLabel))
+        }.
+        getOrElse {
+          (None, None)
+        }
+    }
+
+    val frameworkId = this.frameworkId
+
+    /* TODO - we could end up issuing the same set of resources twice for the same node in the case that a node is
+    trying to grow in resources. That's not a supported use case right now. At the point it is supported, we can do
+    mapping / grouping */
+    val operations = reservedGroupings.map {
+      case ((Some(taskId), Some(`frameworkId`)), resources) if nodes.contains(taskId) =>
+        val node = nodes(taskId)
+        val pendingOffer = PendingOffer(offer.withResources(resources))
+
+        updateNode(
+          processEvents(node, List(NodeFSM.MatchedOffer(pendingOffer, None))))
+
+        pendingOffer.resultingOperations
+
+      case ((Some(_), Some(`frameworkId`)), resources) =>
+        Future.successful(offerOperations.unreserveOffer(resources))
+      case (_, resources) =>
+        val matchCandidateOffer = offer.withResources(resources)
+        val matchingNode = nodes.values.
+          toStream.
+          filter(_.readyForOffer).
+          flatMap { node =>
+            val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
+            ResourceMatcher.matchResources(matchCandidateOffer, node.offerMatchers, selector).
+              map { (_, node) }
+
+          }.
+          headOption
+
+        matchingNode match {
+          case Some((matchResult, node)) =>
+            // TODO - we need to do something with this result
+            val pendingOffer = PendingOffer(matchCandidateOffer)
+            updateNode {
+              processEvents(
+                node.copy(wantingNewOffer = false, offerMatchers = Nil),
+                NodeFSM.MatchedOffer(pendingOffer, Some(matchResult)) :: Nil)}
+            pendingOffer.resultingOperations
+          case _ =>
+            Future.successful(Nil)
+        }
+    }
+    import context.dispatcher
+    Future.sequence(operations).map(_.flatten)
+  }
+
   def ready: Receive = {
     case FrameworkActor.ResourceOffers(offers) =>
+      offers.foreach { offer =>
+        import context.dispatcher
+        handleOffer(offer).
+          map { ops =>
+            if (ops.isEmpty)
+              FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
+            else
+              FrameworkActor.AcceptOffer(offer.getId, ops)
+          }.
+          pipeTo(frameworkActor)
+      }
+      // val offerOpsFuture = offers.map(handleOffer)
+      // val rejectedOffers =
+      // rejectedOffers.foreach { o =>
+      //   frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(30.seconds))
+      // }
+
       // TODO
       // if reservation: known? route to task actor; unknown? destroy / free...
       /* match resource, execute reservation and launch actor. If reserved resource doesn't get re-offered after a
@@ -260,9 +358,27 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       }
   }
 
-  def processNodeEventLoop(events: List[NodeFSM.Event]) = {
-  }
+  def calcMatchers(node: NodeState) = {
+    val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
 
+    val volume = PersistentVolume.apply(
+      "state",
+      PersistentVolumeInfo(
+        cephConfig.deployment.mon.disk,
+        `type` = cephConfig.deployment.mon.disk_type),
+      Volume.Mode.RW)
+
+    // TODO - if matching reserved resources set matchers appropriately
+    List(
+      new ScalarResourceMatcher(
+        protos.Resource.CPUS, cephConfig.deployment.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
+      new ScalarResourceMatcher(
+        protos.Resource.MEM, cephConfig.deployment.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
+      new DiskResourceMatcher(
+        selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
+      new lib.SinglePortMatcher(
+        selector))
+  }
 
   def applyConfiguration(): Unit = {
     val monTasks = nodes.values.filter ( _.role == "mon") // TODO introduce constant
@@ -276,29 +392,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     nodes.foreach { case (taskId, node) =>
       if (node.wantingNewOffer) {
-        import mesosphere.mesos.matcher._
-        import mesosphere.mesos.protos
-
-        val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
-
-        val volume = PersistentVolume.apply(
-          "state",
-          PersistentVolumeInfo(
-            cephConfig.deployment.mon.disk,
-            `type` = cephConfig.deployment.mon.disk_type),
-          Volume.Mode.RW)
-
-        // TODO - if matching reserved resources set matchers appropriately
-        val matchers = List(
-          new ScalarResourceMatcher(
-            protos.Resource.CPUS, cephConfig.deployment.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
-          new ScalarResourceMatcher(
-            protos.Resource.MEM, cephConfig.deployment.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
-          new DiskResourceMatcher(
-            selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
-          new lib.SinglePortMatcher(
-            selector))
-        nodes = nodes.updated(taskId, node.copy(offerMatchers = matchers))
+        nodes = nodes.updated(taskId, node.copy(offerMatchers = calcMatchers(node)))
       }
     }
   }

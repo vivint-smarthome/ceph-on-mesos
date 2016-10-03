@@ -28,9 +28,8 @@ trait FrameworkModule extends Module {
     val frameworkBuilder = FrameworkInfo.newBuilder().
       setUser("").
       setName(options.name).
-      setCheckpoint(true)
-
-    options.principal.foreach(frameworkBuilder.setPrincipal)
+      setCheckpoint(true).
+      setPrincipal(options.principal)
 
     frameworkBuilder.build()
   }
@@ -52,14 +51,13 @@ class Universe(args: List[String]) extends Configuration(args) with Module with 
   bind [KVStore] to (new kvstore.ZookeeperStore)
   bind [FrameworkIdStore] to (new FrameworkIdStore)
   bind [ActorSystem] to system
+  bind [views.ConfigTemplates] to new views.ConfigTemplates
+  bind [OfferOperations] to new OfferOperations
   bind [Option[Credential]] to {
     val options = inject[AppConfiguration]
-    for {
-      principal <- options.principal
-      secret <- options.secret
-    } yield {
+    options.secret.map { secret =>
       Credential.newBuilder().
-        setPrincipal(principal).
+        setPrincipal(options.principal).
         setSecret(secret).
         build()
     }

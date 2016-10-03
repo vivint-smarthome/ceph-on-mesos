@@ -3,6 +3,7 @@ package org.vivint.ceph.kvstore
 import akka.actor.ActorRef
 import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.Source
+import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future, Promise }
 
 import scaldi.Injector

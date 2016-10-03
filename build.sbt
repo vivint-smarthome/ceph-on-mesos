@@ -17,6 +17,7 @@ lazy val root = (project in file(".")).
     resolvers += "Mesosphere Public Repo" at "http://downloads.mesosphere.com/maven",
 
     libraryDependencies ++= Seq(
+      "org.kamranzafar" % "jtar" % "2.3",
       "commons-io" % "commons-io" % "2.5",
       "com.github.kxbmap" %% "configs" % "0.4.3",
       "org.scala-lang.modules" %% "scala-async" % "0.9.5",

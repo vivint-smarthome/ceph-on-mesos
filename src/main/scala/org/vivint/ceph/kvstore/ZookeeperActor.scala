@@ -7,6 +7,7 @@ import org.apache.curator.framework.{ CuratorFramework, CuratorFrameworkFactory 
 import org.apache.curator.framework.recipes.cache.NodeCache
 import org.apache.zookeeper.KeeperException
 import org.vivint.ceph.AppConfiguration
+import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future, Promise }
 import scala.collection.JavaConversions._
 import scala.util.Try
@@ -94,7 +95,7 @@ object ZookeeperActor {
   case class Children(path: String) extends Operation { self =>
     type Response = Seq[String]
     private[kvstore] def apply(client: CuratorFramework): self.Response = {
-      client.getChildren.forPath(path).toSeq
+      client.getChildren.forPath(path).toList
     }
   }
 

@@ -9,7 +9,10 @@ case class CephNode(
   cluster: String,
   role: String,
   paused: Boolean = false,
-  slaveId: Option[String] = None, // This is set once the reservation is confirmed
+  reservationConfirmed: Boolean = false,
+  slaveId: Option[String] = None,
   location: Option[ServiceLocation] = None) {
+  if (reservationConfirmed)
+    require(slaveId.nonEmpty)
   def resourcesReserved = slaveId.nonEmpty
 }

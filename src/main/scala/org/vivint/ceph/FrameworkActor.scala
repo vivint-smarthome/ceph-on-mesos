@@ -12,6 +12,7 @@ import scaldi.Injectable._
 import scaldi.Injector
 import scala.concurrent.duration._
 import scala.collection.mutable
+import scala.collection.immutable.Iterable
 import scala.collection.JavaConverters._
 
 class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
@@ -118,23 +119,24 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         case DeclineOffer(offerId, refuseFor) =>
           processingOffer(offerId) {
             log.debug(s"Decline offer {}", offerId)
-            driver.declineOffer(offerId, ProtoHelpers.newFilters(refuseFor))
+            driver.declineOffer(
+              offerId,
+              ProtoHelpers.newFilters(refuseFor))
           }
-        case AcceptOffer(offerId, operations) =>
+        case AcceptOffer(offerId, operations, refuseFor) =>
           processingOffer(offerId) {
             if(log.isDebugEnabled)
               log.debug(s"Operations on $offerId:\n${operations.mkString("\n")}")
             driver.acceptOffers(
               Collections.singleton(offerId),
-              operations.asJava,
-              ProtoHelpers.newFilters(Some(0.seconds)))
+              operations.asJavaCollection,
+              ProtoHelpers.newFilters(refuseFor.orElse(Some(0.seconds))))
           }
 
         case Reconcile(tasks) =>
           val status = driver.reconcileTasks(tasks.asJava)
           log.info("beginning reconciliation; status is {}", status)
       }
-
 
     case catchAll =>
       println(s"Received ${catchAll}")
@@ -169,7 +171,8 @@ object FrameworkActor {
   /* Mesos commands */
   sealed trait Command
   case class DeclineOffer(offerId: OfferID, refuseFor: Option[FiniteDuration] = None) extends Command
-  case class AcceptOffer(offerId: OfferID, operations: List[Offer.Operation] = Nil) extends Command
+  case class AcceptOffer(offerId: OfferID, operations: Iterable[Offer.Operation] = Nil,
+    refuseFor: Option[FiniteDuration] = None) extends Command
   case class Reconcile(tasks: List[TaskStatus]) extends Command
 }
 

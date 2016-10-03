@@ -1,6 +1,7 @@
 package org.vivint.ceph
 
 import org.vivint.ceph.kvstore.KVStore
+import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future }
 import scala.async.Async.{async, await}
 import java.nio.charset.StandardCharsets.UTF_8

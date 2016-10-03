@@ -2,6 +2,7 @@ package org.vivint.ceph
 
 import akka.actor.{ ActorContext, Cancellable }
 import java.util.concurrent.atomic.AtomicInteger
+import mesosphere.mesos.matcher.ResourceMatcher
 import mesosphere.mesos.protos.TaskStatus
 import org.apache.mesos.Protos.Offer
 import org.vivint.ceph.model.{CephNode,NodeState}
@@ -9,6 +10,7 @@ import NodeFSM._
 import Behavior._
 import scala.annotation.tailrec
 import scala.concurrent.duration._
+import scala.collection.immutable.Iterable
 
 object NodeFSM {
   sealed trait Event
@@ -19,37 +21,62 @@ object NodeFSM {
     def taskStatusChanged(current: NodeState): Boolean =
       prior.taskStatus != current.taskStatus
   }
-  case class MatchedOffer(offer: Offer) extends Event
+  case class MatchedOffer(offer: PendingOffer, matchResult: Option[ResourceMatcher.ResourceMatch]) extends Event
   case class Timer(id: Any) extends Event
 
-  sealed trait Action
+  sealed trait Action {
+    def withTransition(b: BehaviorFactory): Directive =
+      Directive(List(this), Some(b))
+    def andAlso(other: Action): ActionList =
+      ActionList(this :: other :: Nil)
+  }
 
-  case class Directive(action: Option[Action] = None, transition: Option[BehaviorFactory] = None) {
-    def withTransition(b: BehaviorFactory) =
-      copy(transition = Some(b))
+  case class ActionList(actions: List[Action]) {
+    def withTransition(b: BehaviorFactory): Directive =
+      Directive(actions, Some(b))
+
+    def andAlso(other: Action): ActionList =
+      ActionList(actions :+ other)
+  }
+
+  case class Directive(action: List[Action] = Nil, transition: Option[BehaviorFactory] = None)
+
+  object Directive {
+    import scala.language.implicitConversions
+    implicit def fromAction(action: Action): Directive = {
+      Directive(List(action), None)
+    }
+    implicit def fromActionList(actionList: ActionList): Directive = {
+      Directive(actionList.actions, None)
+    }
   }
 
   case class Persist(data: CephNode) extends Action
-  case class Hold(offer: Offer) extends Action
+  case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
+  case object WantOffers extends Action
+  case class OfferResponse(offer: PendingOffer, operations: Iterable[Offer.Operation]) extends Action
 }
 
 trait Directives {
   /**
     * Do nothing. Modify nothing.
     */
-  final def stay = Directive()
+  final val stay = Directive()
 
   /**
     * Update the persistent ceph storage
     */
-  final def persist(data: CephNode) = Directive(Some(Persist(data)))
+  final val persist = Persist(_)
 
   /**
     * Change the behavor out after performing any actions
     */
-  final def transition(behaviorFactory: BehaviorFactory) = Directive(None, Some(behaviorFactory))
+  final def transition(behaviorFactory: BehaviorFactory) = Directive(Nil, Some(behaviorFactory))
 
-  final def hold(offer: Offer) = Directive(Some(Hold(offer)), None)
+  final val hold = Hold(_, _)
+  final val multi = ActionList(_)
+  final val wantOffers = WantOffers
+  final val offerResponse = OfferResponse(_, _)
 }
 
 object Directives extends Directives
@@ -109,5 +136,3 @@ object Behavior {
 trait BehaviorSet {
   def defaultBehaviorFactory: BehaviorFactory
 }
-
-

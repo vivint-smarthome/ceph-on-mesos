@@ -3,6 +3,7 @@ package org.vivint.ceph.kvstore
 import akka.Done
 import akka.actor.Cancellable
 import akka.stream.scaladsl.Source
+import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future }
 
 /** KVStore trait. Asynchronous but implementations MUST PROVIDE linearized read/write guarantees; IE, if two

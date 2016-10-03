@@ -1,8 +1,10 @@
 package org.vivint.ceph
 package views
 
+import akka.util.ByteString
 import com.typesafe.config.ConfigObject
 import java.net.{ Inet4Address, InetAddress }
+import java.util.Base64
 import model._
 import org.apache.mesos.Protos
 import ProtoHelpers._
@@ -11,6 +13,7 @@ import scala.collection.JavaConversions._
 import scaldi.Injector
 import scaldi.Injectable._
 import configs.syntax._
+import java.nio.charset.StandardCharsets.UTF_8
 
 object ConfigTemplates {
   private[views] def renderSettings(cfg: ConfigObject): String = {
@@ -22,10 +25,14 @@ object ConfigTemplates {
   }
 }
 
-class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(implicit inj: Injector) {
+class ConfigTemplates(implicit inj: Injector) {
   import ConfigTemplates._
   val config = inject[AppConfiguration]
   val resolver = inject[String => String]('ipResolver)
+
+  def base64Encode(bs: ByteString): String = {
+    Base64.getEncoder.encodeToString(bs.toArray)
+  }
 
   def deriveLocation(offer: Protos.Offer): ServiceLocation = {
     val ip = resolver(offer.getHostname)
@@ -42,8 +49,9 @@ class ConfigTemplates(secrets: ClusterSecrets, monIps: List[ServiceLocation])(im
       port.getOrElse(6789))
   }
 
-  def cephConf(leaderOffer: Option[Protos.Offer], cephSettings: CephSettings) = {
-    val monitors = leaderOffer.map(o => List(deriveLocation(o))).getOrElse(monIps)
+  def cephConf(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation],
+    leaderOffer: Option[Protos.Offer], cephSettings: CephSettings) = {
+    val monitors = leaderOffer.map(o => Iterable(deriveLocation(o))).getOrElse(monIps)
     s"""
 [global]
 fsid = ${secrets.fsid}
@@ -72,5 +80,65 @@ ${renderSettings(cephSettings.client)}
 [mds]
 ${renderSettings(cephSettings.mds)}
 """
+  }
+
+  def cephClientAdminRing(secrets: ClusterSecrets) = {
+    s"""
+[client.admin]
+	key = ${base64Encode(secrets.adminRing)}
+	auid = 0
+	caps mds = "allow"
+	caps mon = "allow *"
+	caps osd = "allow *"
+"""
+  }
+
+  def cephMonRing(secrets: ClusterSecrets) = {
+    s"""
+[mon.]
+	key = ${base64Encode(secrets.monRing)}
+	caps mon = "allow *"
+"""
+  }
+
+  def bootstrapMdsRing(secrets: ClusterSecrets) = {
+    s"""
+[client.bootstrap-mds]
+	key = ${base64Encode(secrets.mdsRing)}
+	caps mon = "allow profile bootstrap-mds"
+"""
+  }
+
+  def bootstrapOsdRing(secrets: ClusterSecrets) = {
+    s"""
+[client.bootstrap-osd]
+	key = ${base64Encode(secrets.osdRing)}
+	caps mon = "allow profile bootstrap-osd"
+"""
+  }
+
+  def bootstrapRgwRing(secrets: ClusterSecrets) = {
+    s"""
+[client.bootstrap-rgw]
+	key = ${base64Encode(secrets.rgwRing)}
+	caps mon = "allow profile bootstrap-rgw"
+"""
+  }
+
+  def tgz(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation],
+    leaderOffer: Option[Protos.Offer], cephSettings: CephSettings): Array[Byte] = {
+    import lib.TgzHelper.{octal, makeTgz, FileEntry}
+
+    val entries = Seq(
+      "etc/ceph/ceph.conf" -> cephConf(secrets, monIps, leaderOffer, cephSettings),
+      "etc/ceph/ceph.client.admin.keyring" -> cephClientAdminRing(secrets),
+      "etc/ceph/ceph.mon.keyring" -> cephMonRing(secrets),
+      "var/lib/ceph/bootstrap-mds/ceph.keyring" -> bootstrapMdsRing(secrets),
+      "var/lib/ceph/bootstrap-osd/ceph.keyring" -> bootstrapOsdRing(secrets),
+      "var/lib/ceph/bootstrap-rgw/ceph.keyring" -> bootstrapRgwRing(secrets))
+
+    makeTgz(entries.map { case (path, contents) =>
+        path -> FileEntry(octal("644"), contents.getBytes(UTF_8))
+    } : _*)
   }
 }

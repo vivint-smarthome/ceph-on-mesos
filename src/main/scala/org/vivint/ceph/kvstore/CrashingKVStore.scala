@@ -3,6 +3,7 @@ package org.vivint.ceph.kvstore
 import akka.actor.{ ActorContext, Kill }
 import akka.stream.scaladsl.Source
 import org.slf4j.LoggerFactory
+import scala.collection.immutable.Seq
 import scala.concurrent.Future
 
 class CrashingKVStore(kvStore: KVStore)(implicit context: ActorContext)
