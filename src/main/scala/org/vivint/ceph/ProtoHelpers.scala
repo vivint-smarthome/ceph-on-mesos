@@ -20,12 +20,56 @@ object ProtoHelpers {
     b.build
   }
 
-  def newOfferOperation(
-    unreserve: Option[Offer.Operation.Unreserve] = None,
-    destroy: Option[Offer.Operation.Destroy] = None) = {
+  sealed trait OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder
+  }
+  case class UnreserveOperationMagnet(operation: Offer.Operation.Unreserve) extends OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder = {
+      b.
+        setType(Offer.Operation.Type.UNRESERVE).
+        setUnreserve(operation)
+    }
+  }
+  case class DestroyOperationMagnet(destroy: Offer.Operation.Destroy) extends OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder = {
+      b.
+        setType(Offer.Operation.Type.DESTROY).
+        setDestroy(destroy)
+    }
+  }
+  case class CreateOperationMagnet(create: Offer.Operation.Create) extends OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder = {
+      b.
+        setType(Offer.Operation.Type.CREATE).
+        setCreate(create)
+    }
+  }
+  case class ReserveOperationMagnet(reserve: Offer.Operation.Reserve) extends OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder = {
+      b.
+        setType(Offer.Operation.Type.RESERVE).
+        setReserve(reserve)
+    }
+  }
+  case class LaunchOperationMagnet(launch: Offer.Operation.Launch) extends OfferOperationMagnet {
+    def apply(b: Offer.Operation.Builder): Offer.Operation.Builder = {
+      b.
+        setType(Offer.Operation.Type.LAUNCH).
+        setLaunch(launch)
+    }
+  }
+  object OfferOperationMagnet {
+    import scala.language.implicitConversions
+    implicit def fromUnreserve(r: Offer.Operation.Unreserve): OfferOperationMagnet = UnreserveOperationMagnet(r)
+    implicit def fromDestroy(r: Offer.Operation.Destroy): OfferOperationMagnet = DestroyOperationMagnet(r)
+    implicit def fromCreate(r: Offer.Operation.Create): OfferOperationMagnet = CreateOperationMagnet(r)
+    implicit def fromReserve(r: Offer.Operation.Reserve): OfferOperationMagnet = ReserveOperationMagnet(r)
+    implicit def fromLaunch(r: Offer.Operation.Launch): OfferOperationMagnet = LaunchOperationMagnet(r)
+  }
+
+  def newOfferOperation(operation: OfferOperationMagnet) = {
     val b = Offer.Operation.newBuilder
-    destroy.foreach(b.setDestroy)
-    unreserve.foreach(b.setUnreserve)
+    operation(b)
     b.build
   }
 
@@ -38,6 +82,12 @@ object ProtoHelpers {
   def newDestroyOperation(resources: Iterable[Resource]): Offer.Operation.Destroy = {
     val b = Offer.Operation.Destroy.newBuilder
     resources.foreach(b.addVolumes)
+    b.build
+  }
+
+  def newLaunchOperation(taskInfos: Iterable[TaskInfo]): Offer.Operation.Launch = {
+    val b = Offer.Operation.Launch.newBuilder
+    taskInfos.foreach(b.addTaskInfos)
     b.build
   }
 
@@ -127,10 +177,11 @@ object ProtoHelpers {
     b.build
   }
 
-  def newTaskStatus(taskId: String, slaveId: String): TaskStatus =
+  def newTaskStatus(taskId: String, slaveId: String, state: TaskState = TaskState.TASK_LOST): TaskStatus =
     TaskStatus.newBuilder.
       setTaskId(TaskID.newBuilder.setValue(taskId)).
       setSlaveId(SlaveID.newBuilder.setValue(slaveId)).
+      setState(state).
       build
 
   implicit class RichOffer(offer: Offer) {

@@ -13,6 +13,7 @@ import scala.collection.JavaConversions._
 import scaldi.Injector
 import scaldi.Injectable._
 import configs.syntax._
+import mesosphere.mesos.protos.Resource.PORTS
 import java.nio.charset.StandardCharsets.UTF_8
 
 object ConfigTemplates {
@@ -34,19 +35,25 @@ class ConfigTemplates(implicit inj: Injector) {
     Base64.getEncoder.encodeToString(bs.toArray)
   }
 
+  // TODO - find a better home for these methods
+  def inferPort(resources: Iterable[Protos.Resource], default: Int = 6789): Int =
+    resources.
+      toStream.
+      filter(_.getName == PORTS).
+      flatMap(_.ranges).
+      headOption.
+      map(_.min.toInt).
+      getOrElse(default)
   def deriveLocation(offer: Protos.Offer): ServiceLocation = {
     val ip = resolver(offer.getHostname)
 
-    val port = offer.resources.toStream.
-      filter(_.getName == Resource.PORTS).
-      flatMap { _.ranges.headOption.map(_.min.toInt) }.
-      headOption
+    val port = inferPort(offer.resources)
 
     ServiceLocation(
       offer.slaveId.get,
       offer.hostname.get,
       ip,
-      port.getOrElse(6789))
+      port)
   }
 
   def cephConf(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation],

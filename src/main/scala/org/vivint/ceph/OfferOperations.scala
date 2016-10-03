@@ -23,23 +23,14 @@ class OfferOperations(implicit inj: Injector) {
     */
   def unreserveOffer(resources: Iterable[Resource]): Seq[Offer.Operation] = {
     val volumesToDestroy = resources.
-      filter { r => r.hasDisk && r.getDisk.hasPersistence }.
-      map { r =>
-        val b = r.toBuilder.clearDisk
-        r.diskSourceOption.foreach { source =>
-          b.setDisk(ProtoHelpers.newDisk(Some(source)))
-        }
-        b.build
-      }
+      filter { r => r.hasDisk && r.getDisk.hasPersistence }
 
     val offersToRelease = resources.
       filter(_.hasReservation)
 
     Seq(
-      newOfferOperation(
-        destroy = Some(newDestroyOperation(volumesToDestroy))),
-      newOfferOperation(
-        unreserve = Some(newUnreserveOperation(resources))))
+      newOfferOperation(newDestroyOperation(volumesToDestroy)),
+      newOfferOperation(newUnreserveOperation(resources)))
   }
 
   def volId(taskId: String, containerPath: String): String =
@@ -91,10 +82,7 @@ class OfferOperations(implicit inj: Injector) {
     val create = Offer.Operation.Create.newBuilder().
       addAllVolumes(volumes.asJava)
 
-    Offer.Operation.newBuilder.
-      setType(Offer.Operation.Type.CREATE).
-      setCreate(create).
-      build()
+    newOfferOperation(create.build)
   }
 
   /** Adapated from Marathon code.
@@ -119,10 +107,7 @@ class OfferOperations(implicit inj: Injector) {
       addAllResources(reservedResources.asJava).
       build()
 
-    Offer.Operation.newBuilder().
-      setType(Offer.Operation.Type.RESERVE).
-      setReserve(reserve).
-      build()
+    newOfferOperation(reserve)
   }
 
   def reserveAndCreateVolumes(

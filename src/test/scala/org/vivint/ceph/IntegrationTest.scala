@@ -58,7 +58,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       bind [AppConfiguration] to {
         AppConfiguration(master = "hai", name = "ceph-test", principal = "ceph", secret = None, role = "ceph",
           zookeeper = "zk://test", offerTimeout = 5.seconds, publicNetwork = "10.11.12.0/24",
-          clusterNetwork =  "10.11.12.0/24")
+          clusterNetwork =  "10.11.12.0/24", storageBackend = "disk")
       }
       bind [String => String] identifiedBy 'ipResolver to { _: String =>
         "10.11.12.1"

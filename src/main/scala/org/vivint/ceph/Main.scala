@@ -2,69 +2,65 @@ package org.vivint.ceph
 
 import akka.actor.{ ActorRef, ActorSystem, Props }
 import java.net.InetAddress
-import org.apache.curator.framework.{ CuratorFramework, CuratorFrameworkFactory }
-import org.apache.mesos.MesosSchedulerDriver
 import org.apache.mesos.Protos._
 import org.vivint.ceph.kvstore.KVStore
-import scala.concurrent.Future
 import scaldi.Module
-
-trait ZookeeperModule extends Module {
-  private val appConfiguration = inject[AppConfiguration]
-
-
-}
-
-class Configuration(args: List[String]) extends Module {
-  bind [AppConfiguration] to AppConfiguration.fromArgs(args.toList)
-}
 
 trait FrameworkModule extends Module {
 
   bind [FrameworkInfo] to {
-    val options = inject[AppConfiguration]
+    val config = inject[AppConfiguration]
     val kvStore = inject[KVStore]
 
     val frameworkBuilder = FrameworkInfo.newBuilder().
       setUser("").
-      setName(options.name).
+      setName(config.name).
       setCheckpoint(true).
-      setPrincipal(options.principal)
+      setRole(config.role).
+      setPrincipal(config.principal).
+      setCheckpoint(true).
+      setFailoverTimeout(config.failoverTimeout.toDouble)
 
     frameworkBuilder.build()
   }
 }
 
-class Universe(args: List[String]) extends Configuration(args) with Module with ZookeeperModule /*with FrameworkModule*/ {
+class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   implicit val system = ActorSystem("ceph-on-mesos")
-  bind [ActorRef] identifiedBy (classOf[kvstore.ZookeeperActor]) to {
-    system.actorOf(
-      Props(new kvstore.ZookeeperActor).withDispatcher("zookeeper-dispatcher"),
-      "zookeeper-actor")
-  }
+
+  bind [AppConfiguration] to config
 
   bind [String => String] identifiedBy 'ipResolver to { InetAddress.
     getByName(_: String).
     getHostAddress
   }
 
-  bind [KVStore] to (new kvstore.ZookeeperStore)
+  bind [KVStore] to {
+    config.storageBackend match {
+      case "zookeeper" =>
+        new kvstore.ZookeeperStore
+      case "file" =>
+        new kvstore.FileStore(new java.io.File("data"))
+      case "memory" =>
+        new kvstore.MemStore
+    }
+  }
+
   bind [FrameworkIdStore] to (new FrameworkIdStore)
   bind [ActorSystem] to system
   bind [views.ConfigTemplates] to new views.ConfigTemplates
   bind [OfferOperations] to new OfferOperations
   bind [Option[Credential]] to {
-    val options = inject[AppConfiguration]
-    options.secret.map { secret =>
+    config.secret.map { secret =>
       Credential.newBuilder().
-        setPrincipal(options.principal).
+        setPrincipal(config.principal).
         setSecret(secret).
         build()
     }
   }
 
   bind [ActorRef] identifiedBy (classOf[TaskActor]) to {
-    system.actorOf(Props(new TaskActor), "framework-actor")
+    system.actorOf(Props(new TaskActor), "task-actor")
   }
 
   bind [ActorRef] identifiedBy (classOf[FrameworkActor]) to {
@@ -73,7 +69,10 @@ class Universe(args: List[String]) extends Configuration(args) with Module with 
 }
 
 object Main extends App {
-  val module = new Universe(args.toList)
+  val cmdLineOpts = new CephFrameworkOptions(args.toList)
+  val config = AppConfiguration.fromOpts(cmdLineOpts)
+
+  val module = new Universe(config)
   import module.injector
   import scaldi.Injectable._
 

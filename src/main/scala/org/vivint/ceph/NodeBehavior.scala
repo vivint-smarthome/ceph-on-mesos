@@ -24,6 +24,7 @@ class NodeBehavior(
 
   val offerOperations = inject[OfferOperations]
   val configTemplates = inject[views.ConfigTemplates]
+  val appConfig = inject[AppConfiguration]
 
   def decideWhatsNext(state: NodeState, fullState: Map[String, NodeState]): Directive = {
     import Directives._
@@ -155,37 +156,6 @@ class NodeBehavior(
       stay
     }
 
-    private def inferLocationFromStatus(ts: Protos.TaskStatus) = {
-      import scala.collection.JavaConversions._
-      val ip = ts.getContainerStatus.getNetworkInfosList.
-        toStream.
-        flatMap { networkInfo =>
-          networkInfo.getIpAddressesList.toStream
-        }.
-        headOption.
-        map { ipAddress =>
-          ipAddress.getIpAddress
-        }
-      val port = ts.getLabels.get(Constants.PortLabel).get.toInt
-      val hostname = ts.getLabels.get(Constants.HostnameLabel).get
-
-      ServiceLocation(
-        slaveId = ts.getSlaveId.getValue,
-        port = port,
-        hostname = hostname,
-        ip = ip.get)
-    }
-
-    def inferPort(resources: Iterable[Protos.Resource]): Int =
-      resources.
-        filter(_.getName == PORTS).
-        flatMap { p =>
-          p.ranges
-        }.
-        head.
-        min.
-        toInt
-
     def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
       event match {
         case Timer(_) =>
@@ -194,17 +164,22 @@ class NodeBehavior(
           if(!pendingOffer.offer.resources.exists(_.hasReservation))
             offerResponse(pendingOffer, Nil)
           else
-            offerResponse(pendingOffer,
-              determineLaunchCommand(pendingOffer, state, fullState, inferPort(pendingOffer.offer.resources)))
+            persist(
+              state.inferPersistedState.copy(
+                location = Some(configTemplates.deriveLocation(pendingOffer.offer)))).
+              andAlso(
+                offerResponse(
+                  pendingOffer,
+                  determineLaunchCommand(
+                    pendingOffer, state, fullState,
+                    configTemplates.inferPort(pendingOffer.offer.resources))))
         case n: NodeUpdated if state.taskStatus.isEmpty =>
           stay
         case n: NodeUpdated =>
           val status = state.taskStatus.get
           status.getState match {
             case Protos.TaskState.TASK_RUNNING =>
-              persist(
-                state.inferPersistedState.copy(
-                  location = Some(inferLocationFromStatus(status))))
+              stay
             case _ =>
               stay
           }
@@ -255,6 +230,7 @@ class NodeBehavior(
           Constants.HostnameLabel -> pendingOffer.offer.getHostname,
           Constants.PortLabel -> port.toString)).
         setName("le ceph").
+        setContainer(container).
         setSlaveId(pendingOffer.offer.getSlaveId).
         addAllResources(pendingOffer.offer.getResourcesList).
         setCommand(
@@ -262,19 +238,19 @@ class NodeBehavior(
             setShell(true).
             setEnvironment(
               newEnvironment(
+                "CEPH_PUBLIC_NETWORK" -> appConfig.publicNetwork,
                 "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))).
             setValue(s"""
-            |echo "$$CEPH_CONFIG_TGZ" | base64 -D | tar xz -C /
+            |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
             |sed -i "s/:6789/:${port}/g" /entrypoint.sh
+            |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
+            |echo MON_IP = $$MON_IP
             |/entrypoint.sh mon
             |""".stripMargin))
 
       List(
-        Protos.Offer.Operation.newBuilder.
-          setLaunch(
-            Protos.Offer.Operation.Launch.newBuilder.
-              addTaskInfos(taskInfo)).
-          build)
+        newOfferOperation(
+          newLaunchOperation(Seq(taskInfo.build))))
     } else {
       // We wait
       Nil

@@ -11,13 +11,13 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
   val name = opt[String]("name", 'n', descr = "framework name", default = Some("ceph"))
 
   val principal = opt[String]("principal", 'p',
-    descr = "mesos principal as which to authenticate; can be set via MESOS_PRINCIPAL env var",
+    descr = "mesos principal as which to authenticate; can be set via MESOS_PRINCIPAL env var. Default = ceph.",
     required = true,
-    default = Option(System.getenv("MESOS_PRINCIPAL")))
+    default = Option(System.getenv("MESOS_PRINCIPAL")).orElse(Some("ceph")))
 
   val role = opt[String]("role", 'r',
-    descr = "mesos role to use for reservations; can be set via MESOS_ROLE env var",
-    default = Option(System.getenv("MESOS_ROLE")))
+    descr = "mesos role to use for reservations; can be set via MESOS_ROLE env var. Default = ceph.",
+    default = Option(System.getenv("MESOS_ROLE")).orElse(Some("ceph")))
 
   val secret = opt[String]("secret", 's',
     descr = "mesos principal as which to authenticate; can be set via MESOS_SECRET env var",
@@ -33,16 +33,27 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
     default = Option(System.getenv("PUBLIC_NETWORK")) )
 
   val clusterNetwork = opt[String]("cluster-network",
-    descr = "CIDR of the ceph network, in 0.0.0.0/24 format; can be set by CEPH_NETWORK. Defaults to public-network.",
-    default = Option(System.getenv("CLUSTER_NETWORK")) )
+    descr = "CIDR of the ceph network, in 0.0.0.0/24 format; can be set by CEPH_NETWORK. Default = <public-network>.",
+    default = Option(System.getenv("CLUSTER_NETWORK")).orElse(publicNetwork.toOption))
 
   val offerTimeout = opt[Int]("offer-timeout", 't',
-    descr = "Duration in seconds after which offers timeout",
+    descr = "Duration in seconds after which offers timeout; Default = 30.",
     required = false,
     default = Option(30))
 
+  val storageBackend = opt[String]("storage-backend", 'b',
+    descr = "KV storage backend. Options: file, memory, or zookeeper. Default = zookeeper.",
+    required = false,
+    default = Some("zookeeper"))
+
+  val failoverTimeout = opt[Long]("failover-timeout",
+    descr = "Duration in seconds after which to timeout the framework (stopping all tasks); Default = 31536000 (1 year)",
+    required = false,
+    default = Some(31536000))
+
   verify()
 }
+
 case class AppConfiguration(
   master: String,
   name: String,
@@ -52,12 +63,16 @@ case class AppConfiguration(
   zookeeper: String,
   offerTimeout: FiniteDuration,
   publicNetwork: String,
-  clusterNetwork: String
-)
+  clusterNetwork: String,
+  storageBackend: String,
+  failoverTimeout: Long = 31536000L
+) {
+  require(AppConfiguration.validStorageBackends.contains(storageBackend))
+}
 
 object AppConfiguration {
-  def fromArgs(args: List[String]): AppConfiguration = {
-    val o = new CephFrameworkOptions(args)
+  val validStorageBackends = Set("zookeeper", "file", "memory")
+  def fromOpts(o: CephFrameworkOptions): AppConfiguration = {
     AppConfiguration(
       master = o.master(),
       name = o.name(),
@@ -69,6 +84,8 @@ object AppConfiguration {
       zookeeper = o.zookeeper(),
       offerTimeout = o.offerTimeout().seconds,
       publicNetwork = o.publicNetwork(),
-      clusterNetwork = o.clusterNetwork.toOption.getOrElse(o.publicNetwork()))
+      clusterNetwork = o.clusterNetwork(),
+      storageBackend = o.storageBackend(),
+      failoverTimeout = o.failoverTimeout())
   }
 }

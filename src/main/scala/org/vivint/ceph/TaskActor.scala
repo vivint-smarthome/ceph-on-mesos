@@ -51,7 +51,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   val frameworkIdStore = inject[FrameworkIdStore]
   import ProtoHelpers._
   var frameworkId : String = _
-  implicit var behaviorSet: NodeBehavior = _
+  var _behaviorSet: NodeBehavior = _
+  implicit def behaviorSet: NodeBehavior =
+    if (_behaviorSet == null)
+      throw new IllegalStateException("tried to initialize a behaviorSet before behaviorSet was initializied")
+    else
+      _behaviorSet
 
   var nodes: Map[String, NodeState] = Map.empty
   var cephConfig: CephConfig = _
@@ -180,6 +185,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   def receive = {
     case iState @ InitialState(persistentNodeStates, fId, secrets, _cephConfig) =>
+      _behaviorSet = new NodeBehavior(secrets, { () => frameworkId }, { () => cephConfig })
       log.info("InitialState: persistentNodeStates count = {}, fId = {}", persistentNodeStates.length, fId)
         cephConfig = _cephConfig
         frameworkId = fId.getValue
@@ -187,7 +193,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         initializeBehavior(NodeState.fromState(p))
       }
       nodes = newNodes.map { node => node.taskId -> node }(breakOut)
-      behaviorSet = new NodeBehavior(secrets, { () => frameworkId }, { () => cephConfig })
 
       unstashAll()
       startReconciliation()
@@ -208,7 +213,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       context.become(ready)
     } else {
       log.info("Beginning reconciliation")
-      reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
+      reconciliationTimer = context.system.scheduler.scheduleOnce(
+        30.seconds, self, ReconcileTimeout)(context.dispatcher)
       frameworkActor ! FrameworkActor.Reconcile(
         nodes.values.flatMap(_.taskStatus)(breakOut))
       context.become(
@@ -328,6 +334,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     {
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { offer =>
+          log.debug("received offer\n{}", offer)
           import context.dispatcher
           handleOffer(offer).
             map { ops =>
@@ -405,8 +412,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
     val newMonitors = Stream.
       continually { NodeState.forRole("mon") }.
-      map(initializeBehavior).
       take(newMonitorCount).
+      map(initializeBehavior).
       toList
     log.info("added {} new monitors as a result of config update", newMonitors.length)
 

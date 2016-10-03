@@ -14,6 +14,7 @@ import scala.concurrent.duration._
 import scala.collection.mutable
 import scala.collection.immutable.Iterable
 import scala.collection.JavaConverters._
+import FrameworkActor._
 
 class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
   val kvStore = CrashingKVStore(inject[KVStore])
@@ -41,7 +42,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
   def receive = {
     case FrameworkIdLoaded(optFrameworkId) =>
       initialFrameworkId = optFrameworkId
-      log.info("zookeeper connection established and frameworkId state read")
+      log.info("zookeeper connection established and frameworkId state read; optFrameworkId = {}", initialFrameworkId)
       val framework = optFrameworkId.map { id =>
         frameworkTemplate.toBuilder().setId(id).build
       } getOrElse {
@@ -59,17 +60,21 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
           new MesosSchedulerDriver(scheduler, framework, options.master, true)
       }
       // We exit on exception in this actor so we don't have to worry about closing the driver
-      driver.run()
+      val status = driver.start()
+      if (status != Status.DRIVER_RUNNING)
+        throw new RuntimeException(s"Error starting framework: ${status}")
+      // status.getNumber == Stat
+
       unstashAll()
       context.become(disconnected)
     case _ =>
       stash()
   }
 
-  import FrameworkActor._
 
   val registationHandler: Receive = {
     case Registered(driver, frameworkId, masterInfo) =>
+      log.info("Registered; frameworkId = {}", frameworkId)
       if (initialFrameworkId.isEmpty) {
         initialFrameworkId = Some(frameworkId)
         // It's pretty crucial that we don't continue if this fails
@@ -89,6 +94,8 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
   }
 
   def disconnected: Receive = registationHandler orElse {
+    case Error(er) =>
+      throw new RuntimeException("Framework error: s{er}")
     case _ =>
       stash()
   }
@@ -129,7 +136,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         case AcceptOffer(offerId, operations, refuseFor) =>
           processingOffer(offerId) {
             if(log.isDebugEnabled)
-              log.debug(s"Operations on $offerId:\n${operations.mkString("\n")}")
+              log.debug(s"Operations on ${offerId.getValue}:\n${operations.mkString("\n")}")
             driver.acceptOffers(
               Collections.singleton(offerId),
               operations.asJavaCollection,
@@ -186,7 +193,9 @@ class FrameworkActorScheduler(implicit context: ActorContext)
   val log = LoggerFactory.getLogger(getClass)
   import FrameworkActor._
   override def registered(driver: SchedulerDriver, frameworkId: FrameworkID, masterInfo: MasterInfo): Unit = {
+    log.info("framework registered; frameworkId = {}, masterInfo = {}", frameworkId: Any, masterInfo : Any)
     context.self ! Registered(driver, frameworkId, masterInfo)
+    log.info("context.self = {}", context.self)
   }
 
   override def reregistered(driver: SchedulerDriver, masterInfo: MasterInfo): Unit = {
@@ -230,7 +239,7 @@ class FrameworkActorScheduler(implicit context: ActorContext)
   }
 
   def error(driver: SchedulerDriver, message: String): Unit = {
-    log.error(s"Error in frameworkActor {}", message)
+    log.error(s"Error: {}", message)
     context.self ! Error(message)
   }
 }

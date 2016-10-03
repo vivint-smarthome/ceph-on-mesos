@@ -38,6 +38,6 @@ case class TaskStore(kvStore: KVStore) {
 
   def save(node: CephNode): Future[Unit] = {
     val data = Json.toJson(node).toString
-    kvStore.createAndSet("mon:" + node.id.toString, data.getBytes(UTF_8))
+    kvStore.createAndSet("tasks/mon:" + node.id.toString, data.getBytes(UTF_8))
   }
 }
