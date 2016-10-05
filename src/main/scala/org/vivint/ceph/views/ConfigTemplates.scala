@@ -29,36 +29,12 @@ object ConfigTemplates {
 class ConfigTemplates(implicit inj: Injector) {
   import ConfigTemplates._
   val config = inject[AppConfiguration]
-  val resolver = inject[String => String]('ipResolver)
 
   def base64Encode(bs: ByteString): String = {
     Base64.getEncoder.encodeToString(bs.toArray)
   }
 
-  // TODO - find a better home for these methods
-  def inferPort(resources: Iterable[Protos.Resource], default: Int = 6789): Int =
-    resources.
-      toStream.
-      filter(_.getName == PORTS).
-      flatMap(_.ranges).
-      headOption.
-      map(_.min.toInt).
-      getOrElse(default)
-  def deriveLocation(offer: Protos.Offer): ServiceLocation = {
-    val ip = resolver(offer.getHostname)
-
-    val port = inferPort(offer.resources)
-
-    ServiceLocation(
-      offer.slaveId.get,
-      offer.hostname.get,
-      ip,
-      port)
-  }
-
-  def cephConf(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation],
-    leaderOffer: Option[Protos.Offer], cephSettings: CephSettings) = {
-    val monitors = leaderOffer.map(o => Iterable(deriveLocation(o))).getOrElse(monIps)
+  def cephConf(secrets: ClusterSecrets, monitors: Iterable[ServiceLocation], cephSettings: CephSettings) = {
     s"""
 [global]
 fsid = ${secrets.fsid}
@@ -132,12 +108,11 @@ ${renderSettings(cephSettings.mds)}
 """
   }
 
-  def tgz(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation],
-    leaderOffer: Option[Protos.Offer], cephSettings: CephSettings): Array[Byte] = {
+  def tgz(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation], cephSettings: CephSettings): Array[Byte] = {
     import lib.TgzHelper.{octal, makeTgz, FileEntry}
 
     val entries = Seq(
-      "etc/ceph/ceph.conf" -> cephConf(secrets, monIps, leaderOffer, cephSettings),
+      "etc/ceph/ceph.conf" -> cephConf(secrets, monIps, cephSettings),
       "etc/ceph/ceph.client.admin.keyring" -> cephClientAdminRing(secrets),
       "etc/ceph/ceph.mon.keyring" -> cephMonRing(secrets),
       "var/lib/ceph/bootstrap-mds/ceph.keyring" -> bootstrapMdsRing(secrets),

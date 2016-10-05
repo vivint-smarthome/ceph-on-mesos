@@ -9,6 +9,7 @@ import NodeFSM._
 import Behavior._
 import scala.annotation.tailrec
 import scala.concurrent.duration._
+import scala.collection.breakOut
 import model.ClusterSecrets
 import scaldi.Injector
 import scaldi.Injectable._
@@ -22,6 +23,7 @@ class NodeBehavior(
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
 
+  val resolver = inject[String => String]('ipResolver)
   val offerOperations = inject[OfferOperations]
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
@@ -211,11 +213,17 @@ class NodeBehavior(
             offerResponse(pendingOffer, Nil)
           else {
             lazy val peers = state.peers(fullState.values)
-              (state.role, state.pState.goal) match {
+            lazy val monLocations: Set[ServiceLocation] = peers.
+              filter(_.role == NodeRole.Monitor).
+              flatMap{_.pState.location}(breakOut)
+            val nodeLocation = deriveLocation(pendingOffer.offer)
+
+            (state.role, state.pState.goal) match {
               case (NodeRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+
                 persist(
                   state.pState.copy(
-                    location = Some(configTemplates.deriveLocation(pendingOffer.offer)),
+                    location = Some(nodeLocation),
                     lastLaunched = Some(desiredState))).
                   andAlso(
                     offerResponse(
@@ -223,10 +231,11 @@ class NodeBehavior(
                       launchMonCommand(
                         isLeader = peers.forall(_.pState.goal.isEmpty),
                         pendingOffer,
-                        state,
-                        fullState,
-                        configTemplates.inferPort(pendingOffer.offer.resources),
-                        desiredState)))
+                        state.taskId,
+                        nodeLocation = nodeLocation,
+                        desiredState,
+                        monLocations = monLocations
+                      )))
               case _ =>
                 ???
                 // hold(pendingOffer, None)
@@ -247,13 +256,32 @@ class NodeBehavior(
     }
   }
 
-  def launchMonCommand(
-    isLeader: Boolean, pendingOffer: PendingOffer, state: NodeState, fullState: Map[String, NodeState], port: Int,
-    runState: RunState.EnumVal):
+    // TODO - find a better home for these methods
+  private def inferPort(resources: Iterable[Protos.Resource], default: Int = 6789): Int =
+    resources.
+      toStream.
+      filter(_.getName == PORTS).
+      flatMap(_.ranges).
+      headOption.
+      map(_.min.toInt).
+      getOrElse(default)
+
+  private def deriveLocation(offer: Protos.Offer): ServiceLocation = {
+    val ip = resolver(offer.getHostname)
+
+    val port = inferPort(offer.resources)
+
+    ServiceLocation(
+      offer.slaveId.get,
+      offer.hostname.get,
+      ip,
+      port)
+  }
+
+  private def launchMonCommand(
+    isLeader: Boolean, pendingOffer: PendingOffer, taskId: String, nodeLocation: ServiceLocation,
+    runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
-    val mons = fullState.values.filter(_.role == NodeRole.Monitor)
-    def knownMonLocations =
-      mons.exists { _.pState.location.nonEmpty }
 
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
@@ -284,16 +312,15 @@ class NodeBehavior(
 
     val templatesTgz = configTemplates.tgz(
       secrets = secrets,
-      monIps = mons.flatMap(_.pState.location),
-      leaderOffer = if (isLeader) Some(pendingOffer.offer) else None,
+      monIps = (monLocations + nodeLocation).toSeq.sortBy(_.hostname),
       cephSettings = deploymentConfig().settings)
 
     val taskInfo = Protos.TaskInfo.newBuilder.
-      setTaskId(newTaskId(state.taskId)).
+      setTaskId(newTaskId(taskId)).
       setLabels(newLabels(
         Constants.FrameworkIdLabel -> frameworkId().getValue,
-        Constants.HostnameLabel -> pendingOffer.offer.getHostname,
-        Constants.PortLabel -> port.toString)).
+        Constants.HostnameLabel -> nodeLocation.hostname,
+        Constants.PortLabel -> nodeLocation.port.toString)).
       setName("ceph-monitor").
       setContainer(container).
       setSlaveId(pendingOffer.offer.getSlaveId).
@@ -307,7 +334,7 @@ class NodeBehavior(
               "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))).
           setValue(s"""
             |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
-            |sed -i "s/:6789/:${port}/g" /entrypoint.sh config.static.sh
+            |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
             |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
             |echo MON_IP = $$MON_IP
             |${pullMonMapCommand}
