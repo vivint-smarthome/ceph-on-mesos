@@ -12,11 +12,12 @@ import scala.collection.immutable.NumericRange
   */
 object MesosTestHelper {
   import ProtoHelpers._
+  val idx = new java.util.concurrent.atomic.AtomicInteger
   val frameworkID: Mesos.FrameworkID = newFrameworkId("ceph-framework-id")
 
   def makeBasicOffer(cpus: Double = 4.0, mem: Double = 16000, disk: Double = 1024.0,
     ports: NumericRange.Inclusive[Long] = (31000L to 32000L), role: String = ResourceRole.Unreserved,
-    reservationLabels: Option[Mesos.Labels] = None): Offer.Builder = {
+    reservationLabels: Option[Mesos.Labels] = None, slaveId: Int = 0, offerId: Int = idx.incrementAndGet): Offer.Builder = {
 
     require(role != ResourceRole.Unreserved || reservationLabels.isEmpty, "reserved resources cannot have role *")
 
@@ -39,9 +40,9 @@ object MesosTestHelper {
     val portsResource = heedReserved(newRangesResource(PORTS, Seq(ports), role))
 
     val offerBuilder = Offer.newBuilder.
-      setId(newOfferId("1")).
+      setId(newOfferId(offerId.toString)).
       setFrameworkId(frameworkID).
-      setSlaveId(newSlaveId("slave0")).
+      setSlaveId(newSlaveId(s"slave-${slaveId}")).
       setHostname("localhost").
       addResources(cpusResource).
       addResources(memResource).
@@ -108,6 +109,7 @@ object MesosTestHelper {
     offer.toBuilder.clearResources().
       addAllResources(resources.getResourcesList.filterNot(_.getName == DISK)).
       addAllResources(volumes.getVolumesList).
+      setId(newOfferId(idx.incrementAndGet.toString)).
       build
   }
 }

@@ -4,7 +4,7 @@ import akka.actor.{ ActorContext, Cancellable }
 import java.util.concurrent.atomic.AtomicInteger
 import mesosphere.mesos.matcher.ResourceMatcher
 import mesosphere.mesos.protos.TaskStatus
-import org.apache.mesos.Protos.Offer
+import org.apache.mesos.Protos.{FrameworkID, Offer}
 import org.vivint.ceph.model.{CephNode,NodeState}
 import NodeFSM._
 import Behavior._

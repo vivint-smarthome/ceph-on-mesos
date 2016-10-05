@@ -50,7 +50,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   implicit val materializer = ActorMaterializer()
   val frameworkIdStore = inject[FrameworkIdStore]
   import ProtoHelpers._
-  var frameworkId : String = _
+  var frameworkId : FrameworkID = _
   var _behaviorSet: NodeBehavior = _
   implicit def behaviorSet: NodeBehavior =
     if (_behaviorSet == null)
@@ -63,6 +63,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   val config = inject[AppConfiguration]
   val configStore = ConfigStore(kvStore)
+  val offerMatchFactory = new MasterOfferMatchFactory
+  var offerMatchers: Map[NodeRole.EnumVal, OfferMatchFactory.OfferMatcher] = Map.empty
 
   val getFirstConfigUpdate =
     Flow[Option[CephConfig]].
@@ -154,7 +156,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         throttledRevives.offer(())
         node.copy(
           wantingNewOffer = true,
-          offerMatchers = calcMatchers(node))
+          offerMatcher = offerMatchers.get(node.role))
       case NodeFSM.OfferResponse(pendingOffer, operations) =>
         pendingOffer.resultingOperationsPromise.success(operations.toList)
         node
@@ -188,7 +190,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       _behaviorSet = new NodeBehavior(secrets, { () => frameworkId }, { () => cephConfig })
       log.info("InitialState: persistentNodeStates count = {}, fId = {}", persistentNodeStates.length, fId)
         cephConfig = _cephConfig
-        frameworkId = fId.getValue
+        frameworkId = fId
       val newNodes = persistentNodeStates.map { p =>
         initializeBehavior(NodeState.fromState(p))
       }
@@ -222,6 +224,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
+  object OurFrameworkId {
+    def unapply(fId: FrameworkID): Boolean = {
+      fId == frameworkId
+    }
+    def unapply(fId: String) : Boolean = {
+      fId == frameworkId.getValue
+    }
+  }
+
   def reconciling(taskIdsForReconciliation: Set[String]): Receive = (
     {
       case ReconcileTimeout =>
@@ -232,8 +243,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         }
       case FrameworkActor.StatusUpdate(taskStatus) =>
         val taskId = taskStatus.getTaskId.getValue
-        nodes.get(taskId) match {
-          case Some(node) =>
+        (nodes.get(taskId), taskStatus.getLabels.get(Constants.FrameworkIdLabel)) match {
+          case (Some(node), Some(OurFrameworkId())) =>
             val nextState = node.copy(taskStatus = Some(taskStatus))
             val nextPending = taskIdsForReconciliation - taskId
 
@@ -247,8 +258,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             } else {
               context.become(reconciling(nextPending))
             }
-          case None =>
-            maybeKillUnknownTask(taskStatus)
+          case (None, Some(OurFrameworkId())) =>
+            // The task is ours but we don't recognize it. Kill it.
+            frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
+          case (_, _) =>
+            ()
         }
     }: Receive
   ).
@@ -259,13 +273,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     nodes = nodes.updated(node.taskId, node)
 
   def stashReceiver: Receive = { case _ => stash }
-
-  def maybeKillUnknownTask(taskStatus: TaskStatus) = {
-    if (taskStatus.getLabels.get(Constants.FrameworkIdLabel) == Some(frameworkId)) {
-      // kill it
-      ???
-    }
-  }
 
   /** Looking at reservation labels, routes the offer to the appropriate
     *
@@ -283,13 +290,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         }
     }
 
-    val frameworkId = this.frameworkId
-
     /* TODO - we could end up issuing the same set of resources twice for the same node in the case that a node is
     trying to grow in resources. That's not a supported use case right now. At the point it is supported, we can do
     mapping / grouping */
     val operations = reservedGroupings.map {
-      case ((Some(taskId), Some(`frameworkId`)), resources) if nodes.contains(taskId) =>
+      case ((Some(taskId), Some(OurFrameworkId())), resources) if nodes.contains(taskId) =>
         val node = nodes(taskId)
         val pendingOffer = PendingOffer(offer.withResources(resources))
 
@@ -298,18 +303,18 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         pendingOffer.resultingOperations
 
-      case ((Some(_), Some(`frameworkId`)), resources) =>
+      case ((Some(_), Some(OurFrameworkId())), resources) =>
         Future.successful(offerOperations.unreserveOffer(resources))
-      case (_, resources) =>
+      case ((None, None), resources) =>
         val matchCandidateOffer = offer.withResources(resources)
         val matchingNode = nodes.values.
           toStream.
           filter(_.readyForOffer).
           flatMap { node =>
             val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
-            ResourceMatcher.matchResources(matchCandidateOffer, node.offerMatchers, selector).
+            node.offerMatcher.
+              flatMap { _(matchCandidateOffer, node, nodes.values) }.
               map { (_, node) }
-
           }.
           headOption
 
@@ -319,12 +324,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             val pendingOffer = PendingOffer(matchCandidateOffer)
             updateNode {
               processEvents(
-                node.copy(wantingNewOffer = false, offerMatchers = Nil),
+                node.copy(wantingNewOffer = false, offerMatcher = None),
                 NodeFSM.MatchedOffer(pendingOffer, Some(matchResult)) :: Nil)}
             pendingOffer.resultingOperations
           case _ =>
             Future.successful(Nil)
         }
+      case ((_, _), _) =>
+        Future.successful(Nil)
     }
     import context.dispatcher
     Future.sequence(operations).map(_.flatten)
@@ -332,12 +339,19 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   def ready: Receive = (
     {
+      case FrameworkActor.StatusUpdate(taskStatus) if nodes contains taskStatus.getTaskId.getValue =>
+        val priorState = nodes(taskStatus.getTaskId.getValue)
+        val nextState = priorState.copy(taskStatus = Some(taskStatus))
+        updateNode(nextState)
+        processEvents(nextState, List(NodeFSM.NodeUpdated(priorState)))
+
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { offer =>
           log.debug("received offer\n{}", offer)
           import context.dispatcher
           handleOffer(offer).
             map { ops =>
+              log.debug("response for offer {}: {}", offer.getId.getValue, ops.map(_.getType.getValueDescriptor))
               if (ops.isEmpty)
                 FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
               else
@@ -345,19 +359,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             }.
             pipeTo(frameworkActor)
         }
-        // val offerOpsFuture = offers.map(handleOffer)
-        // val rejectedOffers =
-        // rejectedOffers.foreach { o =>
-        //   frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(30.seconds))
-        // }
-
-        // TODO
-        // if reservation: known? route to task actor; unknown? destroy / free...
-        /* match resource, execute reservation and launch actor. If reserved resource doesn't get re-offered after a
-         period of time then crash. Watch for death and put actor back in to pending stage. Task must store
-         reservationId, which must be unique per reservation */
-        // stay
-
     }: Receive
   ).
     orElse(default)
@@ -385,45 +386,24 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       }
   }
 
-  def calcMatchers(node: NodeState) = {
-    val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
-
-    val volume = PersistentVolume.apply(
-      "state",
-      PersistentVolumeInfo(
-        cephConfig.deployment.mon.disk,
-        `type` = cephConfig.deployment.mon.disk_type),
-      Volume.Mode.RW)
-
-    // TODO - if matching reserved resources set matchers appropriately
-    List(
-      new ScalarResourceMatcher(
-        protos.Resource.CPUS, cephConfig.deployment.mon.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
-      new ScalarResourceMatcher(
-        protos.Resource.MEM, cephConfig.deployment.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
-      new DiskResourceMatcher(
-        selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
-      new lib.SinglePortMatcher(
-        selector))
-  }
-
   def applyConfiguration(): Unit = {
-    val monTasks = nodes.values.filter ( _.role == "mon") // TODO introduce constant
+    val monTasks = nodes.values.filter ( _.role == NodeRole.Monitor) // TODO introduce constant
     val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
     val newMonitors = Stream.
-      continually { NodeState.forRole("mon") }.
+      continually { NodeState.forRole(NodeRole.Monitor) }.
       take(newMonitorCount).
       map(initializeBehavior).
       toList
     log.info("added {} new monitors as a result of config update", newMonitors.length)
 
     nodes = nodes ++ newMonitors.map { m => m.taskId -> m }
+    offerMatchers = offerMatchFactory(cephConfig)
 
     var matchersUpdated = false
     nodes.foreach { case (taskId, node) =>
       if (node.wantingNewOffer) {
         matchersUpdated = true
-        nodes = nodes.updated(taskId, node.copy(offerMatchers = calcMatchers(node)))
+        nodes = nodes.updated(taskId, node.copy(offerMatcher = offerMatchers.get(node.role)))
       }
     }
     if (matchersUpdated) {

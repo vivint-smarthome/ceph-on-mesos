@@ -40,7 +40,7 @@ class OfferOperations(implicit inj: Injector) {
     * TODO - put appropriate copyright information
     */
   def createVolumes(
-    frameworkId: String,
+    frameworkId: FrameworkID,
     taskId: String,
     localVolumes: Iterable[(DiskSource, PersistentVolume)]): Offer.Operation = {
     import scala.collection.JavaConverters._
@@ -65,7 +65,7 @@ class OfferOperations(implicit inj: Injector) {
 
         val reservation = Resource.ReservationInfo.newBuilder.
           setLabels(newLabels(
-            Constants.FrameworkIdLabel -> frameworkId,
+            Constants.FrameworkIdLabel -> frameworkId.getValue,
             Constants.TaskIdLabel -> taskId)).
           setPrincipal(config.principal)
 
@@ -87,13 +87,13 @@ class OfferOperations(implicit inj: Injector) {
 
   /** Adapated from Marathon code.
     * TODO - put appropriate copyright information */
-  def reserve(frameworkId: String, taskId: String, resources: Iterable[Resource]): Offer.Operation = {
+  def reserve(frameworkId: FrameworkID, taskId: String, resources: Iterable[Resource]): Offer.Operation = {
     import scala.collection.JavaConverters._
     val reservedResources = resources.map { resource =>
 
       val reservation = Resource.ReservationInfo.newBuilder().
         setLabels(newLabels(
-            Constants.FrameworkIdLabel -> frameworkId,
+            Constants.FrameworkIdLabel -> frameworkId.getValue,
             Constants.TaskIdLabel -> taskId)).
         setPrincipal(config.principal)
 
@@ -111,7 +111,7 @@ class OfferOperations(implicit inj: Injector) {
   }
 
   def reserveAndCreateVolumes(
-    frameworkId: String,
+    frameworkId: FrameworkID,
     taskId: String,
     resourceMatch: ResourceMatcher.ResourceMatch): List[Offer.Operation] = {
 

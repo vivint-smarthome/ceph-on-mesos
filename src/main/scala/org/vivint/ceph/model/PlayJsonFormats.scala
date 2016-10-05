@@ -1,4 +1,5 @@
-package org.vivint.ceph.model
+package org.vivint.ceph
+package model
 import akka.util.ByteString
 import java.util.Base64
 import play.api.libs.json._
@@ -18,6 +19,24 @@ object PlayJsonFormats{
         base64Encoder.encodeToString(byteString.toArray))
   }
 
+  def enumFormat[T <: lib.Enum](e: T): Format[T#EnumVal] = new Format[T#EnumVal] {
+    def reads(js: JsValue): JsResult[T#EnumVal] = js match {
+      case JsString(str) =>
+        e.values.find(_.name == str) match {
+          case Some(enumVal) => JsSuccess(enumVal)
+          case None =>
+            JsError(s"invalid value for ${e}: ${str}. Valid values are ${e.values.map(_.name).mkString(",")}")
+        }
+      case other =>
+        JsError(s"string expected, got ${other}")
+    }
+
+    def writes(enumVal: T#EnumVal): JsValue =
+      JsString(enumVal.name)
+  }
+
+  implicit val RunStateFormat = enumFormat(RunState)
+  implicit val NodeRoleFormat = enumFormat(NodeRole)
   implicit val ServiceLocationFormat = Json.format[ServiceLocation]
   implicit val MonTaskFormat = Json.format[CephNode]
   implicit val ClusterSecretsFormat = Json.format[ClusterSecrets]

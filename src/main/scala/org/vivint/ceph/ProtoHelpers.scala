@@ -243,4 +243,11 @@ object ProtoHelpers {
       }(breakOut)
     }
   }
+
+  implicit class RichLaunch(launch: Offer.Operation.Launch) {
+    def tasks: List[TaskInfo] = {
+      launch.getTaskInfosList.toList
+    }
+  }
+
 }

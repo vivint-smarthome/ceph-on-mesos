@@ -11,7 +11,8 @@ case class MonDeploymentConfig(
   cpus: Double,
   mem: Double,
   disk_type: DiskType,
-  disk: Long
+  disk: Long,
+  max_per_host: Int
 )
 
 case class OSDDeploymentConfig(
@@ -22,7 +23,7 @@ case class OSDDeploymentConfig(
   disk: Long,
   disk_max: Option[Long],
   path_constraint: Option[String],
-  journal_size: Long
+  max_per_host: Int
 )
 
 
@@ -55,11 +56,12 @@ deployment {
   mon {
     disk_type = root
     disk = 16
+    max_per_host = 1
   }
 
   osd {
     disk_type = root
-    journal_size = 100
+    max_per_host = 1
   }
 }
 
