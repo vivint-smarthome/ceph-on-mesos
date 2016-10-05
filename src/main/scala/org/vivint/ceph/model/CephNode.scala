@@ -8,12 +8,14 @@ object RunState extends lib.Enum {
 
   case object Paused extends EnumVal { val name = "paused" }
   case object Running extends EnumVal { val name = "running" }
+  val values = Vector(Paused, Running)
 }
 
 object NodeRole extends lib.Enum {
   sealed trait EnumVal extends Value
 
   case object Monitor extends EnumVal { val name = "mon" }
+  val values = Vector(Monitor)
 }
 
 

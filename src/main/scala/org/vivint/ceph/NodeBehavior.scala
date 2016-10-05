@@ -307,7 +307,7 @@ class NodeBehavior(
               "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))).
           setValue(s"""
             |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
-            |sed -i "s/:6789/:${port}/g" /entrypoint.sh
+            |sed -i "s/:6789/:${port}/g" /entrypoint.sh config.static.sh
             |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
             |echo MON_IP = $$MON_IP
             |${pullMonMapCommand}

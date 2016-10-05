@@ -25,7 +25,7 @@ object PlayJsonFormats{
         e.values.find(_.name == str) match {
           case Some(enumVal) => JsSuccess(enumVal)
           case None =>
-            JsError(s"invalid value for ${e}: ${str}. Valid values are ${e.values.map(_.name).mkString(",")}")
+            JsError(s"invalid value for ${e}: '${str}'. Valid values are ${e.values.map { v => "'" + v.name + "'" }.mkString(",")}")
         }
       case other =>
         JsError(s"string expected, got ${other}")

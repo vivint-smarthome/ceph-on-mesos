@@ -1,6 +1,6 @@
 package org.vivint.ceph
 
-import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, Props, Stash }
+import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, PoisonPill, Props, Stash }
 import akka.pattern.pipe
 import akka.stream.{ ActorMaterializer, OverflowStrategy, ThrottleMode }
 import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
@@ -18,6 +18,7 @@ import scala.collection.JavaConverters._
 import scala.collection.immutable.{Iterable, Seq}
 import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.util.{Success, Failure}
 import scaldi.Injectable._
 import scaldi.Injector
 
@@ -96,11 +97,23 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     configStore.storeConfigIfNotExist()
 
-    tSequence(
-      taskStore.getNodes,
-      frameworkIdStore.get,
-      ClusterSecretStore.createOrGenerateSecrets(kvStore),
-      deployConfigF
+    log.info("pulling initial state for TaskActor")
+    def logging[T](f: Future[T], desc: String): Future[T] = {
+      log.debug(s"${desc} : pulling state")
+      f.onComplete {
+        case Success(_) => log.debug("{} : success", desc)
+        case Failure(ex) =>
+          log.error(ex, "{}: failure", desc)
+          self ! PoisonPill
+      }
+      f
+    }
+
+    val initialState = tSequence(
+      logging(taskStore.getNodes, "taskStore.getNodes"),
+      logging(frameworkIdStore.get, "frameworkIdStore.get"),
+      logging(ClusterSecretStore.createOrGenerateSecrets(kvStore), "secrets"),
+      logging(deployConfigF, "deploy config")
     ).
       map(InitialState.tupled).
       pipeTo(self)
@@ -236,15 +249,19 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   def reconciling(taskIdsForReconciliation: Set[String]): Receive = (
     {
       case ReconcileTimeout =>
-        throw new TimeoutException("Timed out while reconciling")
+        startReconciliation()
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { o =>
           frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(5.seconds))
         }
       case FrameworkActor.StatusUpdate(taskStatus) =>
         val taskId = taskStatus.getTaskId.getValue
-        (nodes.get(taskId), taskStatus.getLabels.get(Constants.FrameworkIdLabel)) match {
-          case (Some(node), Some(OurFrameworkId())) =>
+        nodes.get(taskId) match {
+          case Some(node) =>
+            if (log.isDebugEnabled)
+              log.debug("received stats update {}", taskStatus)
+            else
+              log.info("received status update for {}", taskId)
             val nextState = node.copy(taskStatus = Some(taskStatus))
             val nextPending = taskIdsForReconciliation - taskId
 
@@ -258,11 +275,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             } else {
               context.become(reconciling(nextPending))
             }
-          case (None, Some(OurFrameworkId())) =>
+          case None =>
+            log.info("received status update for unknown task {}; going to try and kill it", taskId)
             // The task is ours but we don't recognize it. Kill it.
             frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
-          case (_, _) =>
-            ()
         }
     }: Receive
   ).
