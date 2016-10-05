@@ -230,7 +230,7 @@ class NodeBehavior(
                       pendingOffer,
                       launchMonCommand(
                         isLeader = peers.forall(_.pState.goal.isEmpty),
-                        pendingOffer,
+                        pendingOffer.offer,
                         state.taskId,
                         nodeLocation = nodeLocation,
                         desiredState,
@@ -279,10 +279,40 @@ class NodeBehavior(
   }
 
   private def launchMonCommand(
-    isLeader: Boolean, pendingOffer: PendingOffer, taskId: String, nodeLocation: ServiceLocation,
+    isLeader: Boolean, offer: Protos.Offer, taskId: String, nodeLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
+    val pullMonMapCommand = if (isLeader) {
+      ""
+    } else {
+      """if [ ! -f /etc/ceph/monmap-ceph ]; then
+        |  echo "Pulling monitor map"; ceph mon getmap -o /etc/ceph/monmap-ceph
+        |fi
+        |""".stripMargin
+    }
+
+    val taskInfo = launchCephCommand(taskId, offer, nodeLocation, monLocations + nodeLocation, Nil)(
+      s"""
+      |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
+      |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
+      |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
+      |${pullMonMapCommand}
+      |/entrypoint.sh mon
+      |""".stripMargin
+    )
+
+    List(
+      newOfferOperation(
+        newLaunchOperation(Seq(taskInfo.build))))
+  }
+
+  private def launchCephCommand(taskId: String, offer: Protos.Offer, nodeLocation: ServiceLocation,
+    monLocations: Iterable[ServiceLocation], vars: Seq[(String, String)])(command: String)= {
+    val templatesTgz = configTemplates.tgz(
+      secrets = secrets,
+      monIps = monLocations.toSeq.sortBy(_.hostname),
+      cephSettings = deploymentConfig().settings)
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
@@ -301,19 +331,12 @@ class NodeBehavior(
           containerPath = "/var/lib/ceph",
           hostPath = "state/var"))
 
-    val pullMonMapCommand = if (isLeader) {
-      ""
-    } else {
-      """if [ ! -f /etc/ceph/monmap-ceph ]; then
-        |  echo "Pulling monitor map"; ceph mon getmap -o /etc/ceph/monmap-ceph
-        |fi
-        |""".stripMargin
-    }
-
-    val templatesTgz = configTemplates.tgz(
-      secrets = secrets,
-      monIps = (monLocations + nodeLocation).toSeq.sortBy(_.hostname),
-      cephSettings = deploymentConfig().settings)
+    val env = newEnvironment(
+      (Seq(
+        "CEPH_PUBLIC_NETWORK" -> appConfig.publicNetwork,
+        "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))
+        ++
+        vars) : _*)
 
     val taskInfo = Protos.TaskInfo.newBuilder.
       setTaskId(newTaskId(taskId)).
@@ -323,28 +346,19 @@ class NodeBehavior(
         Constants.PortLabel -> nodeLocation.port.toString)).
       setName("ceph-monitor").
       setContainer(container).
-      setSlaveId(pendingOffer.offer.getSlaveId).
-      addAllResources(pendingOffer.offer.getResourcesList).
+      setSlaveId(offer.getSlaveId).
+      addAllResources(offer.getResourcesList).
       setCommand(
         Protos.CommandInfo.newBuilder.
           setShell(true).
-          setEnvironment(
-            newEnvironment(
-              "CEPH_PUBLIC_NETWORK" -> appConfig.publicNetwork,
-              "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))).
+          setEnvironment(env).
           setValue(s"""
             |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
-            |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
-            |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
-            |echo MON_IP = $$MON_IP
-            |${pullMonMapCommand}
-            |/entrypoint.sh mon
+            |${command}
             |""".stripMargin))
-
-    List(
-      newOfferOperation(
-        newLaunchOperation(Seq(taskInfo.build))))
+    taskInfo
   }
+
 
   def defaultBehaviorFactory = InitializeLogic
 }
