@@ -1,8 +1,9 @@
 package org.vivint.ceph
 
-import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, Stash }
+import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, DeadLetter, Stash }
 import akka.pattern.pipe
 import java.util.Collections
+import java.util.concurrent.TimeoutException
 import org.apache.mesos.Protos._
 import org.apache.mesos._
 import org.slf4j.LoggerFactory
@@ -33,55 +34,76 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
 
   override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
     // crash hard
+    context.stop(self)
     log.error(reason, s"Exiting due to Framework Actor crash. Last message = {}", message)
+    Thread.sleep(100)
     System.exit(1)
   }
 
-  var initialFrameworkId: Option[FrameworkID] = None
+  var frameworkId: Option[FrameworkID] = None
 
   def receive = {
     case FrameworkIdLoaded(optFrameworkId) =>
-      initialFrameworkId = optFrameworkId
-      log.info("zookeeper connection established and frameworkId state read; optFrameworkId = {}", initialFrameworkId)
-      val framework = optFrameworkId.map { id =>
-        frameworkTemplate.toBuilder().setId(id).build
-      } getOrElse {
-        frameworkTemplate
-      }
-
-      log.info("starting scheduler")
-
-      val scheduler = new FrameworkActorScheduler
-
-      val driver = credentials match {
-        case Some(c) =>
-          new MesosSchedulerDriver(scheduler, framework, options.master, true, c)
-        case None =>
-          new MesosSchedulerDriver(scheduler, framework, options.master, true)
-      }
-      // We exit on exception in this actor so we don't have to worry about closing the driver
-      val status = driver.start()
-      if (status != Status.DRIVER_RUNNING)
-        throw new RuntimeException(s"Error starting framework: ${status}")
-      // status.getNumber == Stat
+      frameworkId = optFrameworkId
+      log.info("frameworkId state read; optFrameworkId = {}", optFrameworkId)
 
       unstashAll()
-      context.become(disconnected)
+      connect()
     case _ =>
       stash()
   }
 
+  // def waitForFirstRegistration(timer: Cancellable): Receive =
+
+  def connect(): Unit = {
+    val framework = frameworkId.map { id =>
+      frameworkTemplate.toBuilder().setId(id).build
+    } getOrElse {
+      frameworkTemplate
+    }
+
+    log.info("starting scheduler")
+
+    val scheduler = new FrameworkActorScheduler
+
+    val driver = credentials match {
+      case Some(c) =>
+        new MesosSchedulerDriver(scheduler, framework, options.master, true, c)
+      case None =>
+        new MesosSchedulerDriver(scheduler, framework, options.master, true)
+    }
+    // We exit on exception in this actor so we don't have to worry about closing the driver
+    val status = driver.start()
+    if (status != Status.DRIVER_RUNNING)
+      throw new RuntimeException(s"Error starting framework: ${status}")
+    // status.getNumber == Stat
+
+    import context.dispatcher
+    val timeout = context.system.scheduler.scheduleOnce(30.seconds, self, 'timeout)
+    context.become({
+      case 'timeout =>
+        throw new TimeoutException("timed out while attempting to register framework with mesos")
+      case r: Registered =>
+        log.info("Registered! ID = " + r.frameworkId.getValue)
+        if (frameworkId.isEmpty) {
+          // It's pretty crucial that we don't continue if this fails
+          frameworkId = Some(r.frameworkId)
+          Await.result(frameworkStore.set(r.frameworkId), 30.seconds)
+        }
+
+        timeout.cancel()
+        stash() // we want to re-handle this message in the next behavior
+        unstashAll()
+        context.become(registationHandler)
+      case _ =>
+        stash()
+    })
+  }
+
+  context.system.eventStream.subscribe(self, classOf[DeadLetter])
 
   val registationHandler: Receive = {
-    case Registered(driver, frameworkId, masterInfo) =>
-      log.info("Registered; frameworkId = {}", frameworkId)
-      if (initialFrameworkId.isEmpty) {
-        initialFrameworkId = Some(frameworkId)
-        // It's pretty crucial that we don't continue if this fails
-        Await.result(frameworkStore.set(frameworkId), 30.seconds)
-      }
-
-      log.info("Registered! ID = " + frameworkId.getValue)
+    case Registered(driver, newFrameworkId, masterInfo) =>
       taskActor ! Connected
       unstashAll()
       context.become(connected(driver))
@@ -112,6 +134,7 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
       taskActor ! statusUpdate
 
     case o @ ResourceOffers(offers) =>
+      log.debug("received {} offers from mesos. Forwarding to TaskActor", offers.length)
       offers.foreach { offer =>
         pendingOffers(offer.getId) = context.system.scheduler.scheduleOnce(options.offerTimeout) {
           log.debug(s"Timing out offer {}", offer.getId)
@@ -119,6 +142,16 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         }(context.dispatcher)
       }
       taskActor ! o
+
+    case d: DeadLetter =>
+      d match {
+        case DeadLetter(resourceOffers: ResourceOffers, self, taskActor) =>
+          log.info("offer was not received. Declining")
+          resourceOffers.offers.foreach { offer =>
+            self ! DeclineOffer(offer.getId, Some(30.seconds))
+          }
+        case _ =>
+      }
 
     case cmd: Command =>
       cmd match {

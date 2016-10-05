@@ -79,11 +79,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
 
-  result.
-    onFailure { case ex: Throwable =>
-      log.error(ex, "Unexpected error in config stream")
-      self ! Kill
-    }(context.dispatcher)
+  lib.FutureMonitor.monitor(result, "configuration stream")
+  lib.FutureMonitor.monitor(kvStore.crashed, "kvStore")
 
   val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail).
     throttle(1, 5.seconds, 1, ThrottleMode.shaping).
@@ -221,35 +218,20 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   var reconciliationTimer: Cancellable = DummyCancellable
   def startReconciliation(): Unit = {
     reconciliationTimer.cancel() // clear out any existing timers
-    val taskIdsForReconciliation: Set[String] =
+    var taskIdsForReconciliation: Set[String] =
       nodes.values.flatMap { _.taskStatus.map(_.getTaskId.getValue) }(breakOut)
     if (taskIdsForReconciliation.isEmpty) {
       log.info("Skipping reconciliation; no known tasks to reconcile")
       context.become(ready)
-    } else {
-      log.info("Beginning reconciliation")
-      reconciliationTimer = context.system.scheduler.scheduleOnce(
-        30.seconds, self, ReconcileTimeout)(context.dispatcher)
-      frameworkActor ! FrameworkActor.Reconcile(
-        nodes.values.flatMap(_.taskStatus)(breakOut))
-      context.become(
-        reconciling(taskIdsForReconciliation))
+      return ()
     }
-  }
-
-  object OurFrameworkId {
-    def unapply(fId: FrameworkID): Boolean = {
-      fId == frameworkId
-    }
-    def unapply(fId: String) : Boolean = {
-      fId == frameworkId.getValue
-    }
-  }
-
-  def reconciling(taskIdsForReconciliation: Set[String]): Receive = (
-    {
+    log.info("Beginning reconciliation")
+    reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
+    var reconciledResult = List.empty[(NodeState, TaskStatus)]
+    frameworkActor ! FrameworkActor.Reconcile(nodes.values.flatMap(_.taskStatus)(breakOut))
+    context.become {
       case ReconcileTimeout =>
-        startReconciliation()
+        throw new Exception("timeout during reconciliation")
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { o =>
           frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(5.seconds))
@@ -262,33 +244,45 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
               log.debug("received stats update {}", taskStatus)
             else
               log.info("received status update for {}", taskId)
-            val nextState = node.copy(taskStatus = Some(taskStatus))
-            val nextPending = taskIdsForReconciliation - taskId
+            taskIdsForReconciliation -= taskId
+            reconciledResult = (node, taskStatus) :: reconciledResult
 
-            updateNode(
-              processEvents(nextState, List(NodeFSM.NodeUpdated(node))))
-
-            if (nextPending.isEmpty) {
-              reconciliationTimer.cancel()
-              unstashAll()
-              context.become(ready)
-            } else {
-              context.become(reconciling(nextPending))
-            }
           case None =>
             log.info("received status update for unknown task {}; going to try and kill it", taskId)
             // The task is ours but we don't recognize it. Kill it.
             frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
         }
-    }: Receive
-  ).
-    orElse(default).
-    orElse(stashReceiver)
+
+        if (taskIdsForReconciliation.isEmpty) {
+          reconciledResult.foreach { case (node, taskStatus) =>
+            updateNode(
+              processEvents(
+                node.copy(taskStatus = Some(taskStatus)),
+                List(NodeFSM.NodeUpdated(node))))
+          }
+
+          reconciliationTimer.cancel()
+          unstashAll()
+          log.info("reconciliation complete")
+          context.become(ready)
+        }
+      case _ => stash()
+    }
+  }
+
+  object OurFrameworkId {
+    def unapply(fId: FrameworkID): Boolean = {
+      fId == frameworkId
+    }
+    def unapply(fId: String) : Boolean = {
+      fId == frameworkId.getValue
+    }
+  }
+
+  // def reconciling(taskIdsForReconciliation: Set[String]): Receive =
 
   def updateNode(node: NodeState): Unit =
     nodes = nodes.updated(node.taskId, node)
-
-  def stashReceiver: Receive = { case _ => stash }
 
   /** Looking at reservation labels, routes the offer to the appropriate
     *

@@ -1,8 +1,10 @@
 package org.vivint.ceph
 
 import akka.actor.{ ActorRef, ActorSystem, Props }
+import akka.pattern.BackoffSupervisor
 import java.net.InetAddress
 import org.apache.mesos.Protos._
+import scala.concurrent.duration._
 import org.vivint.ceph.kvstore.KVStore
 import scaldi.Module
 
@@ -60,7 +62,14 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   }
 
   bind [ActorRef] identifiedBy (classOf[TaskActor]) to {
-    system.actorOf(Props(new TaskActor), "task-actor")
+    system.actorOf(
+      BackoffSupervisor.props(childProps = Props(new TaskActor),
+        childName =  "task-actor",
+        minBackoff = 1.second,
+        maxBackoff = 10.seconds,
+        randomFactor = 0.2),
+      "task-actor-backoff"
+    )
   }
 
   bind [ActorRef] identifiedBy (classOf[FrameworkActor]) to {
