@@ -467,6 +467,8 @@ class NodeBehavior(
 
     val env = newEnvironment(
       (Seq(
+        "MESOS_TASK_ID" -> taskId,
+        "CEPH_ROLE" -> role.name,
         "CEPH_PUBLIC_NETWORK" -> appConfig.publicNetwork,
         "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))
         ++

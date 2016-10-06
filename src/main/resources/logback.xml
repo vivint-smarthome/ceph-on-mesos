@@ -8,6 +8,7 @@
     </encoder>
   </appender>
 
+  <logger name="akka.io.TcpListener" level="WARN"/>
   <root level="debug">
     <appender-ref ref="STDOUT" />
   </root>

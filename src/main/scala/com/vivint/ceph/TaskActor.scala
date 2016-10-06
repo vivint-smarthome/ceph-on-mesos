@@ -381,7 +381,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             map { ops =>
               log.debug("response for offer {}: {}", offer.getId.getValue, ops.map(_.getType.getValueDescriptor))
               if (ops.isEmpty)
-                FrameworkActor.DeclineOffer(offer.getId, Some(30.seconds))
+                FrameworkActor.DeclineOffer(offer.getId, Some(2.minutes))
               else
                 FrameworkActor.AcceptOffer(offer.getId, ops.toList)
             }.
