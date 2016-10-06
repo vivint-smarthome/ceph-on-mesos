@@ -8,6 +8,7 @@ import org.vivint.ceph.model.{ NodeRole, RunState, CephNode, CephConfig, NodeSta
 import NodeFSM._
 import Behavior._
 import scala.annotation.tailrec
+import scala.collection.immutable.NumericRange
 import scala.concurrent.duration._
 import scala.collection.breakOut
 import model.ClusterSecrets
@@ -135,7 +136,6 @@ class NodeBehavior(
           if (pendingOffer.offer.resources.exists(_.hasReservation)) {
             val newState = state.inferPersistedState.copy(
               reservationConfirmed = true)
-            println(s"newState = ${newState}")
             persist(newState).
               andAlso(hold(pendingOffer, matchResult)).
               withTransition(WaitForSync(decideWhatsNext))
@@ -192,7 +192,6 @@ class NodeBehavior(
           if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) // am I the first or are others running?
             becomeRunning
           else {
-            println(s"Becoming poll. ${fullState.values.map(_.taskStatus.map(_.getState.getValueDescriptor))}")
             poll
           }
 
@@ -213,10 +212,10 @@ class NodeBehavior(
             offerResponse(pendingOffer, Nil)
           else {
             lazy val peers = state.peers(fullState.values)
-            lazy val monLocations: Set[ServiceLocation] = peers.
+            lazy val monLocations: Set[ServiceLocation] = fullState.values.
               filter(_.role == NodeRole.Monitor).
               flatMap{_.pState.location}(breakOut)
-            val nodeLocation = deriveLocation(pendingOffer.offer)
+            lazy val nodeLocation = deriveLocation(pendingOffer.offer)
 
             (state.role, state.pState.goal) match {
               case (NodeRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
@@ -231,11 +230,26 @@ class NodeBehavior(
                       launchMonCommand(
                         isLeader = peers.forall(_.pState.goal.isEmpty),
                         pendingOffer.offer,
-                        state.taskId,
+                        state,
                         nodeLocation = nodeLocation,
                         desiredState,
                         monLocations = monLocations
                       )))
+              case (NodeRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+                persist(
+                  state.pState.copy(
+                    location = Some(nodeLocation),
+                    lastLaunched = Some(desiredState))).
+                  andAlso(
+                    offerResponse(
+                      pendingOffer,
+                      launchOSDCommand(
+                        pendingOffer.offer,
+                        state,
+                        nodeLocation = nodeLocation,
+                        desiredState,
+                        monLocations = monLocations)))
+
               case _ =>
                 ???
                 // hold(pendingOffer, None)
@@ -256,7 +270,15 @@ class NodeBehavior(
     }
   }
 
-    // TODO - find a better home for these methods
+  private def inferPortRange(resources: Iterable[Protos.Resource], default: NumericRange.Inclusive[Long] = 6800L to 7300L):
+      NumericRange.Inclusive[Long] =
+    resources.
+      toStream.
+      filter(_.getName == PORTS).
+      flatMap(_.ranges).
+      headOption.
+      getOrElse(default)
+
   private def inferPort(resources: Iterable[Protos.Resource], default: Int = 6789): Int =
     resources.
       toStream.
@@ -272,14 +294,13 @@ class NodeBehavior(
     val port = inferPort(offer.resources)
 
     ServiceLocation(
-      offer.slaveId.get,
       offer.hostname.get,
       ip,
       port)
   }
 
   private def launchMonCommand(
-    isLeader: Boolean, offer: Protos.Offer, taskId: String, nodeLocation: ServiceLocation,
+    isLeader: Boolean, offer: Protos.Offer, node: NodeState, nodeLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -292,27 +313,85 @@ class NodeBehavior(
         |""".stripMargin
     }
 
-    val taskInfo = launchCephCommand(taskId, offer, nodeLocation, monLocations + nodeLocation, Nil)(
-      s"""
-      |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
-      |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
-      |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
-      |${pullMonMapCommand}
-      |/entrypoint.sh mon
-      |""".stripMargin
-    )
+    val templatesTgz = configTemplates.tgz(
+      secrets = secrets,
+      monitors = (monLocations + nodeLocation),
+      cephSettings = deploymentConfig().settings)
+
+    val taskInfo = launchCephCommand(
+      taskId = node.taskId,
+      role = node.role,
+      offer = offer,
+      nodeLocation = nodeLocation,
+      templatesTgz = templatesTgz,
+      command =
+        s"""
+        |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
+        |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
+        |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
+        |${pullMonMapCommand}
+        |/entrypoint.sh mon
+        |""".stripMargin)
 
     List(
       newOfferOperation(
         newLaunchOperation(Seq(taskInfo.build))))
   }
 
-  private def launchCephCommand(taskId: String, offer: Protos.Offer, nodeLocation: ServiceLocation,
-    monLocations: Iterable[ServiceLocation], vars: Seq[(String, String)])(command: String)= {
+  private def launchOSDCommand(
+    offer: Protos.Offer, node: NodeState, nodeLocation: ServiceLocation,
+    runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
+      List[Protos.Offer.Operation] = {
+
+    val pullMonMapCommand = {
+      """if [ ! -f /etc/ceph/monmap-ceph ]; then
+        |  echo "Pulling monitor map"; ceph mon getmap -o /etc/ceph/monmap-ceph
+        |fi
+        |""".stripMargin
+    }
+
     val templatesTgz = configTemplates.tgz(
       secrets = secrets,
-      monIps = monLocations.toSeq.sortBy(_.hostname),
-      cephSettings = deploymentConfig().settings)
+      monitors = monLocations,
+      cephSettings = deploymentConfig().settings,
+      osdPort = Some(inferPortRange(offer.resources.toList)))
+
+    val taskInfo = launchCephCommand(
+      taskId = node.taskId,
+      role = node.role,
+      offer = offer,
+      nodeLocation = nodeLocation,
+      templatesTgz = templatesTgz,
+      command =
+        s"""
+        |if [ "$$(df -T /var/lib/ceph | tail -n 1 | awk '{print $$2}')" != "xfs" ]; then
+        |  echo "Cowardly refusing to OSD start on non-xfs volume."
+        |  echo "Cowardly refusing to OSD start on non-xfs volume." 1>&2
+        |  echo "Please see http://docs.ceph.com/docs/jewel/rados/configuration/filesystem-recommendations/#not-recommended for more information"
+        |  sleep 60
+        |  exit
+        |fi
+        |set -x -e
+        |echo "Pulling monitor map"
+        |ceph mon getmap -o /etc/ceph/monmap-ceph
+        |
+        |if [ ! -f /etc/ceph/my_osd_id ]; then
+        |  ceph osd create > /etc/ceph/my_osd_id
+        |fi
+        |OSD_ID=$$(cat /etc/ceph/my_osd_id)
+        |mkdir -p /var/lib/ceph/osd/ceph-$${OSD_ID}
+        |chown ceph:ceph /var/lib/ceph/osd/ceph-$${OSD_ID}
+        |
+        |/entrypoint.sh osd_directory
+        |""".stripMargin)
+
+    List(
+      newOfferOperation(
+        newLaunchOperation(Seq(taskInfo.build))))
+  }
+
+  private def launchCephCommand(taskId: String, role: NodeRole.EnumVal, command: String, offer: Protos.Offer,
+    nodeLocation: ServiceLocation, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
@@ -344,7 +423,7 @@ class NodeBehavior(
         Constants.FrameworkIdLabel -> frameworkId().getValue,
         Constants.HostnameLabel -> nodeLocation.hostname,
         Constants.PortLabel -> nodeLocation.port.toString)).
-      setName("ceph-monitor").
+      setName(s"ceph-${role}").
       setContainer(container).
       setSlaveId(offer.getSlaveId).
       addAllResources(offer.getResourcesList).

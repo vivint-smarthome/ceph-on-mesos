@@ -397,16 +397,25 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def applyConfiguration(): Unit = {
-    val monTasks = nodes.values.filter ( _.role == NodeRole.Monitor) // TODO introduce constant
+    val monTasks = nodes.values.filter ( _.role == NodeRole.Monitor)
     val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
     val newMonitors = Stream.
       continually { NodeState.forRole(NodeRole.Monitor) }.
       take(newMonitorCount).
       map(initializeBehavior).
       toList
-    log.info("added {} new monitors as a result of config update", newMonitors.length)
 
-    nodes = nodes ++ newMonitors.map { m => m.taskId -> m }
+    val cephTasks = nodes.values.filter (_.role == NodeRole.OSD)
+    val newOSDCount = Math.max(0, cephConfig.deployment.osd.count - cephTasks.size)
+    val newOSDs = Stream.
+      continually { NodeState.forRole(NodeRole.OSD) }.
+      take(newOSDCount).
+      map(initializeBehavior).
+      toList
+
+    log.info("added {} new monitors, {} new OSDs as a result of config update", newMonitors.length, newOSDs.length)
+
+    nodes = nodes ++ (newMonitors ++ newOSDs).map { m => m.taskId -> m }
     offerMatchers = offerMatchFactory(cephConfig)
 
     var matchersUpdated = false
@@ -420,6 +429,5 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       log.info("matchers were updated. Scheduling revive")
       throttledRevives.offer(())
     }
-
   }
 }

@@ -3,20 +3,26 @@ package org.vivint.ceph
 import akka.actor.{ ActorRef, ActorSystem, PoisonPill, Props }
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
-import akka.testkit.{ ImplicitSender, TestProbe }
 import akka.testkit.TestKit
+import akka.testkit.TestProbe
 import com.typesafe.config.{ Config, ConfigFactory, ConfigRenderOptions }
 import java.io.File
+import java.nio.charset.StandardCharsets.UTF_8
+import java.util.Base64.getDecoder
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import mesosphere.mesos.protos.Resource.{CPUS, MEM, PORTS, DISK}
 import org.apache.commons.io.FileUtils
 import org.apache.mesos.Protos
 import org.scalatest.Inside
 import org.scalatest.exceptions.TestFailedException
 import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
-import mesosphere.mesos.protos.Resource.{CPUS, MEM, PORTS, DISK}
 import org.vivint.ceph.kvstore.KVStore
+import org.vivint.ceph.lib.TgzHelper
+import org.vivint.ceph.model.{ CephNode, NodeRole, RunState, ServiceLocation }
 import org.vivint.ceph.views.ConfigTemplates
 import scala.annotation.tailrec
+import scala.collection.breakOut
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -48,7 +54,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     TestKit.shutdownActorSystem(system)
   }
 
-  class TestBindings extends Module {
+  trait TestBindings extends Module {
     val id = idx.incrementAndGet()
     bind [TestProbe] to { TestProbe() } destroyWith {
       _.ref ! PoisonPill
@@ -127,7 +133,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
   }
 
 
-  def reservationResponse(offer: Protos.Offer): PartialFunction[Any, Protos.Offer] = {
+  def handleReservationResponse(offer: Protos.Offer): PartialFunction[Any, Protos.Offer] = {
     case offerResponse: FrameworkActor.AcceptOffer =>
       offerResponse.offerId shouldBe offer.getId
       val List(reserve, create) = offerResponse.operations
@@ -137,10 +143,11 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       MesosTestHelper.mergeReservation(
         offer, reserve.getReserve, create.getCreate)
   }
+  val ignoreRevive: PartialFunction[Any,Boolean] = { case FrameworkActor.ReviveOffers => true }
 
   it("should launch a monitors on unique hosts") {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
-    val module = new TestBindings
+    val module = new TestBindings {}
     import module.injector
 
     val taskActor = inject[ActorRef](classOf[TaskActor])
@@ -168,7 +175,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     val responses = gatherResponses(probe, List(offer, sameOffer))
 
-    val reservedOffer = inside(responses(offer))(reservationResponse(offer))
+    val reservedOffer = inside(responses(offer))(handleReservationResponse(offer))
 
     inside(responses(sameOffer)) {
       case offerResponse: FrameworkActor.DeclineOffer =>
@@ -186,7 +193,9 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         offerResponse.offerId shouldBe reservedOffer.getId
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
         val List(task) = offerResponse.operations(0).getLaunch.tasks
-        task.getCommand.getValue.contains("entrypoint.sh") shouldBe true
+        val shCommand = task.getCommand.getValue
+        shCommand.contains("entrypoint.sh") shouldBe true
+        shCommand.contains("ceph mon getmap") shouldBe false
         task.getTaskId
     }
 
@@ -205,14 +214,12 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     val altSlaveOffer = MesosTestHelper.makeBasicOffer(slaveId = 1).build
     taskActor ! FrameworkActor.ResourceOffers(List(altSlaveOffer))
 
-    val altReservedOffer = inside(probe.receiveOne(5.seconds))(reservationResponse(altSlaveOffer))
+    val altReservedOffer = inside(probe.receiveOne(5.seconds))(handleReservationResponse(altSlaveOffer))
 
     taskActor ! FrameworkActor.ResourceOffers(List(altReservedOffer))
 
-    val ignoreRevive: PartialFunction[Any,Boolean] = { case FrameworkActor.ReviveOffers => true }
     inside(gatherResponse(probe, altReservedOffer, ignoreRevive)) {
       case offerResponse: FrameworkActor.AcceptOffer =>
-        offerResponse.offerId shouldBe altReservedOffer.getId
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
         val List(task) = offerResponse.operations(0).getLaunch.tasks
         val shCommand = task.getCommand.getValue
@@ -221,5 +228,82 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     }
 
     module.destroy(_ => true)
+  }
+
+  def readConfig(configMD5: String): Map[String, String] =
+    TgzHelper.readTgz(getDecoder.decode(configMD5)).map {
+      case (k, v) => (k, new String(v, UTF_8))
+    }.toMap
+
+  it("should launch OSDs") {
+    implicit val ec: ExecutionContext = SameThreadExecutionContext
+    val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
+    val monitorNode = CephNode(
+      id = UUID.randomUUID(),
+      cluster = "ceph",
+      role = NodeRole.Monitor,
+      lastLaunched = Some(RunState.Running),
+      reservationConfirmed = true,
+      slaveId = Some("slave-12"),
+      location = Some(monLocation))
+
+    val module = new TestBindings {
+      bind [KVStore] to {
+        val store = new kvstore.MemStore
+        val taskStore = new TaskStore(store)
+        taskStore.save(monitorNode)
+        store
+      }
+    }
+
+    import module.injector
+
+    val taskActor = inject[ActorRef](classOf[TaskActor])
+    val probe = inject[TestProbe]
+    implicit val sender = probe.ref
+
+    inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
+
+    val kvStore = inject[KVStore]
+    val configStore = new ConfigStore(inject[KVStore])
+    implicit val materializer = ActorMaterializer()
+
+    // Wait for configuration update
+    val config = await(cephConfUpdates.runWith(Sink.head))
+
+    inside(probe.receiveOne(5.seconds)) {
+      case r: FrameworkActor.Reconcile =>
+        r.tasks.length shouldBe 1
+        val taskStatus = r.tasks.head
+        taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
+    }
+    updateConfig("deployment.osd.count = 1")
+    probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
+
+    val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).
+      addResources(newScalarResource(
+        DISK, 1024000.0, disk = Some(MesosTestHelper.mountDisk("/mnt/ssd-1")))).build
+    taskActor ! FrameworkActor.ResourceOffers(List(offer))
+
+    val reservedOffer = inside(gatherResponse(probe, offer, ignoreRevive))(handleReservationResponse(offer))
+
+    taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+
+    inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
+      case offerResponse: FrameworkActor.AcceptOffer =>
+        offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+        val List(task) = offerResponse.operations(0).getLaunch.tasks
+        val shCommand = task.getCommand.getValue
+        shCommand.contains("entrypoint.sh osd_directory") shouldBe true
+        val config = readConfig(task.getCommand.getEnvironment.get("CEPH_CONFIG_TGZ").get)
+        val cephConfig = config("etc/ceph/ceph.conf")
+        cephConfig.lines.filter(_.contains("ms_bind_port")).toList shouldBe List(
+          "ms_bind_port_min = 31000",
+          "ms_bind_port_max = 31004")
+        cephConfig.lines.filter(_.startsWith("mon")).take(3).toList shouldBe List(
+          s"mon initial members = ${monLocation.hostname}",
+          s"mon host = ${monLocation.hostname}:${monLocation.port}",
+          s"mon addr = ${monLocation.ip}:${monLocation.port}")
+    }
   }
 }

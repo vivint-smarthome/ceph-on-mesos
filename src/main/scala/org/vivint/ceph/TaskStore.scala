@@ -14,8 +14,10 @@ case class TaskStore(kvStore: KVStore) {
   import model._
 
   import PlayJsonFormats._
+
+  val nodePathRegex = s"^${NodeRole.values.mkString("|")}:".r
   private val parsingFunction: PartialFunction[String, (String, (JsValue => CephNode))] = {
-    case path if path.startsWith("mon:") =>
+    case path if nodePathRegex.findFirstMatchIn(path).nonEmpty =>
       (path, _.as[CephNode])
   }
 
@@ -38,6 +40,6 @@ case class TaskStore(kvStore: KVStore) {
 
   def save(node: CephNode): Future[Unit] = {
     val data = Json.toJson(node).toString
-    kvStore.createAndSet("tasks/mon:" + node.id.toString, data.getBytes(UTF_8))
+    kvStore.createAndSet(s"tasks/${node.role}:" + node.id.toString, data.getBytes(UTF_8))
   }
 }

@@ -15,12 +15,11 @@ object NodeRole extends lib.Enum {
   sealed trait EnumVal extends Value
 
   case object Monitor extends EnumVal { val name = "mon" }
-  val values = Vector(Monitor)
+  case object OSD extends EnumVal { val name = "osd" }
+  val values = Vector(Monitor, OSD)
 }
 
-
-
-case class ServiceLocation(slaveId: String, hostname: String, ip: String, port: Int)
+case class ServiceLocation(hostname: String, ip: String, port: Int)
 
 case class CephNode(
   id: UUID,

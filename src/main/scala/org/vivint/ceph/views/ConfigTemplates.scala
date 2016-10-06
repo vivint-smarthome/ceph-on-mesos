@@ -10,6 +10,7 @@ import org.apache.mesos.Protos
 import ProtoHelpers._
 import mesosphere.mesos.protos.Resource
 import scala.collection.JavaConversions._
+import scala.collection.immutable.NumericRange
 import scaldi.Injector
 import scaldi.Injectable._
 import configs.syntax._
@@ -34,13 +35,25 @@ class ConfigTemplates(implicit inj: Injector) {
     Base64.getEncoder.encodeToString(bs.toArray)
   }
 
-  def cephConf(secrets: ClusterSecrets, monitors: Iterable[ServiceLocation], cephSettings: CephSettings) = {
+  def cephConf(secrets: ClusterSecrets, monitors: Set[ServiceLocation], cephSettings: CephSettings,
+    osdPort: Option[NumericRange.Inclusive[Long]]) = {
+
+    val sortedMonitors = monitors.toSeq.sortBy(_.hostname)
+
+    val osdPortSection = osdPort.map { port =>
+      s"""
+      |## ports
+      |ms_bind_port_min = ${port.min}
+      |ms_bind_port_max = ${port.max}
+      |""".stripMargin
+    }.getOrElse("")
+
     s"""
 [global]
 fsid = ${secrets.fsid}
-mon initial members = ${monitors.map(_.hostname).mkString(",")}
-mon host = ${monitors.map { m => m.hostname + ":" + m.port }.mkString(",")}
-mon addr =  ${monitors.map { m => m.ip + ":" + m.port }.mkString(",")}
+mon initial members = ${sortedMonitors.map(_.hostname).mkString(",")}
+mon host = ${sortedMonitors.map { m => m.hostname + ":" + m.port }.mkString(",")}
+mon addr = ${sortedMonitors.map { m => m.ip + ":" + m.port }.mkString(",")}
 auth cluster required = cephx
 auth service required = cephx
 auth client required = cephx
@@ -56,6 +69,7 @@ ${renderSettings(cephSettings.mon)}
 
 [osd]
 ${renderSettings(cephSettings.osd)}
+${osdPortSection}
 
 [client]
 ${renderSettings(cephSettings.client)}
@@ -108,11 +122,12 @@ ${renderSettings(cephSettings.mds)}
 """
   }
 
-  def tgz(secrets: ClusterSecrets, monIps: Iterable[ServiceLocation], cephSettings: CephSettings): Array[Byte] = {
+  def tgz(secrets: ClusterSecrets, monitors: Set[ServiceLocation], cephSettings: CephSettings,
+    osdPort: Option[NumericRange.Inclusive[Long]] = None): Array[Byte] = {
     import lib.TgzHelper.{octal, makeTgz, FileEntry}
 
     val entries = Seq(
-      "etc/ceph/ceph.conf" -> cephConf(secrets, monIps, cephSettings),
+      "etc/ceph/ceph.conf" -> cephConf(secrets, monitors, cephSettings, osdPort),
       "etc/ceph/ceph.client.admin.keyring" -> cephClientAdminRing(secrets),
       "etc/ceph/ceph.mon.keyring" -> cephMonRing(secrets),
       "var/lib/ceph/bootstrap-mds/ceph.keyring" -> bootstrapMdsRing(secrets),

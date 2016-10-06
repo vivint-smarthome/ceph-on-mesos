@@ -212,6 +212,19 @@ object ProtoHelpers {
       if (reservation.hasLabels) Some(reservation.getLabels) else None
   }
 
+  implicit class RichEnvironment(env: Environment) {
+    def get(key: String): Option[String] =
+      env.getVariablesList.iterator.collectFirst {
+        case variable if variable.getName == key => variable.getValue
+      }
+
+    def toMap: Map[String, String] = {
+      env.getVariablesList.map { l =>
+        l.getName -> l.getValue
+      }(breakOut)
+    }
+  }
+
   implicit class RichResource(resource: Resource) {
 
     def reservation =

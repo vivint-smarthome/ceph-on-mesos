@@ -1,16 +1,12 @@
 package org.vivint.ceph.kvstore
 
 
-import akka.Done
 import akka.stream.OverflowStrategy
-import akka.stream.scaladsl.{ Keep, SourceQueueWithComplete }
-import java.io.{ File, FileInputStream, FileOutputStream }
-import java.util.Arrays
-import java.util.concurrent.{ ExecutorService, Executors }
-import org.apache.commons.io.IOUtils
+import akka.stream.scaladsl.SourceQueueWithComplete
+import java.io.File
+import java.util.concurrent.Executors
 import scala.collection.immutable.Seq
-import scala.concurrent.{ ExecutionContext, Future, Promise }
-import scala.concurrent.duration._
+import scala.concurrent.{ ExecutionContext, Future }
 import akka.stream.scaladsl.Source
 
 /** For use in tests.

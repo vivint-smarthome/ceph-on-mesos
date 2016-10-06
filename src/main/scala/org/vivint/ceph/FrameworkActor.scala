@@ -182,9 +182,6 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         case KillTask(taskId) =>
           driver.killTask(taskId)
       }
-
-    case catchAll =>
-      println(s"Received ${catchAll}")
   }
 
 

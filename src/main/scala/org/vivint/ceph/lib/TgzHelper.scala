@@ -1,8 +1,11 @@
 package org.vivint.ceph.lib
 
-import java.io.ByteArrayOutputStream
-import org.kamranzafar.jtar.{ TarEntry, TarHeader, TarOutputStream }
+import java.io.{ ByteArrayInputStream, ByteArrayOutputStream }
+import java.util.zip.GZIPInputStream
+import org.apache.commons.io.IOUtils
+import org.kamranzafar.jtar.{ TarEntry, TarHeader, TarInputStream, TarOutputStream }
 import java.util.zip.GZIPOutputStream
+import scala.collection.{Iterator,breakOut}
 
 object TgzHelper {
   def octal(digits: String): Int =
@@ -26,4 +29,31 @@ object TgzHelper {
     tgz.close()
     dest.toByteArray()
   }
+
+  class TarIterator(s: TarInputStream) extends Iterator[(TarEntry, Array[Byte])] {
+    var _nextEntry: (TarEntry, Array[Byte]) = null
+    private def loadNext(): Unit =
+      _nextEntry = s.getNextEntry match {
+        case null => null
+        case entry => (entry, IOUtils.toByteArray(s))
+      }
+
+    def hasNext = _nextEntry != null
+    def next() = {
+      val nextResult = _nextEntry
+      loadNext()
+      nextResult
+    }
+    loadNext()
+  }
+
+  def readTgz(tgz: Array[Byte]): Iterator[(String, Array[Byte])] = {
+    val input = new ByteArrayInputStream(tgz)
+    val stream = new TarInputStream(new GZIPInputStream(input))
+
+    new TarIterator(stream).map {
+      case (entry, data) => entry.getName -> data
+    }
+  }
+
 }
