@@ -1,7 +1,9 @@
 package com.vivint.ceph
 
+import com.typesafe.config.ConfigFactory
 import org.rogach.scallop._
 import scala.concurrent.duration._
+import AppConfiguration.config
 
 class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
   val master = opt[String]("master", 'm',
@@ -51,6 +53,14 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
     required = false,
     default = Some(31536000))
 
+  val apiPort = opt[Int]("api-port",
+    descr = s"HTTP API port; can be set via API_PORT; default 8080",
+    default = Option(System.getenv("API_PORT")).map(_.toInt)).orElse(Some(8080))
+
+  val apiHost = opt[String]("api-host",
+    descr = s"HTTP API host; can be set via API_HOST; default 127.0.0.1",
+    default = Option(System.getenv("API_HOST"))).orElse(Some("127.0.0.1"))
+
   verify()
 }
 
@@ -65,12 +75,16 @@ case class AppConfiguration(
   publicNetwork: String,
   clusterNetwork: String,
   storageBackend: String,
-  failoverTimeout: Long = 31536000L
+  failoverTimeout: Long = 31536000L,
+  apiPort: Int = config.getInt("api.port"),
+  apiHost: String = config.getString("api.host")
 ) {
   require(AppConfiguration.validStorageBackends.contains(storageBackend))
 }
 
 object AppConfiguration {
+  val config = ConfigFactory.load
+
   val validStorageBackends = Set("zookeeper", "file", "memory")
   def fromOpts(o: CephFrameworkOptions): AppConfiguration = {
     AppConfiguration(
@@ -86,6 +100,9 @@ object AppConfiguration {
       publicNetwork = o.publicNetwork(),
       clusterNetwork = o.clusterNetwork(),
       storageBackend = o.storageBackend(),
-      failoverTimeout = o.failoverTimeout())
+      failoverTimeout = o.failoverTimeout(),
+      apiPort = o.apiPort(),
+      apiHost = o.apiHost()
+    )
   }
 }

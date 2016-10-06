@@ -23,12 +23,8 @@ import scaldi.Injectable._
 import scaldi.Injector
 
 object TaskActor {
-  sealed trait State
-  case object Initializing extends State
-  case object Disconnected extends State
-  case object Reconciling extends State
-  case object Ready extends State
-
+  sealed trait Command
+  case object GetTasks extends Command
   case class InitialState(
     nodes: Seq[CephNode],
     frameworkId: FrameworkID,
@@ -374,6 +370,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     orElse(default)
 
   def default: Receive = {
+    case cmd: Command =>
+      cmd match {
+        case GetTasks =>
+          sender ! nodes
+      }
+
     case FrameworkActor.Connected =>
       startReconciliation()
 

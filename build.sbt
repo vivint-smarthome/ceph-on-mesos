@@ -1,4 +1,4 @@
-val akkaVersion = "2.4.9"
+val akkaVersion = "2.4.11"
 val mesosVersion = "1.0.0"
 val curatorVer = "2.11.0"
 val playVersion = "2.5.8"
@@ -23,6 +23,7 @@ lazy val root = (project in file(".")).
       "org.scala-lang.modules" %% "scala-async" % "0.9.5",
       "org.apache.mesos" % "mesos" % mesosVersion,
       "com.typesafe.akka" %% "akka-actor" % akkaVersion,
+      "com.typesafe.akka" %% "akka-http-experimental" % akkaVersion,
       "com.typesafe.akka" %% "akka-stream" % akkaVersion,
       "com.typesafe.akka" %% "akka-slf4j" % akkaVersion,
       "com.typesafe.play" %% "play-json" % playVersion,

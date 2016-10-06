@@ -75,6 +75,7 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   bind [ActorRef] identifiedBy (classOf[FrameworkActor]) to {
     system.actorOf(Props(new FrameworkActor), "framework-actor")
   }
+  bind [api.HttpService] to { new api.HttpService }
 }
 
 object Main extends App {
@@ -89,4 +90,6 @@ object Main extends App {
 
   val taskActor = inject[ActorRef](classOf[TaskActor])
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
+  val httpService = inject[api.HttpService]
+  httpService.run()
 }
