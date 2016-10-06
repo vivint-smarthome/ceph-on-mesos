@@ -37,6 +37,10 @@ case class NodeState(
   def peers(p: Iterable[NodeState]): Iterable[NodeState] =
     p.filter { peer => (peer.role == this.role) && peer != this }
 
+  def goal = pState.goal
+  def lastLaunched = pState.lastLaunched
+  def slaveId = pState.slaveId
+
   @deprecated("move to pState", "")
   def inferPersistedState: CephNode = pState
 

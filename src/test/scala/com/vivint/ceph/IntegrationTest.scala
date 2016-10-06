@@ -105,6 +105,14 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     }
   }
 
+  @tailrec final def receiveIgnoring(probe: TestProbe, d: FiniteDuration, ignore: PartialFunction[Any, Boolean]): Any = {
+    val received = probe.receiveOne(d)
+      if (ignore.isDefinedAt(received) && ignore(received))
+        receiveIgnoring(probe, d, ignore)
+      else
+        received
+  }
+
   @tailrec final def gatherResponses(testProbe: TestProbe, offers: List[Protos.Offer],
     results: Map[Protos.Offer, FrameworkActor.OfferResponseCommand] = Map.empty,
     ignore: PartialFunction[Any, Boolean] = { case _ => false }):
@@ -112,18 +120,14 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     if (offers.isEmpty)
       results
     else {
-      val received = testProbe.receiveOne(5.seconds)
-      if (ignore.isDefinedAt(received) && ignore(received))
-        gatherResponses(testProbe, offers, results, ignore)
-      else {
-        val (newResults, newOffers) = inside(received) {
-          case msg: FrameworkActor.OfferResponseCommand =>
-            val offer = offers.find(_.getId == msg.offerId).get
-            ( results.updated(offer, msg),
-              offers.filterNot(_ == offer))
-        }
-        gatherResponses(testProbe, newOffers, newResults, ignore)
+      val received = receiveIgnoring(testProbe, 5.seconds, ignore)
+      val (newResults, newOffers) = inside(received) {
+        case msg: FrameworkActor.OfferResponseCommand =>
+          val offer = offers.find(_.getId == msg.offerId).get
+          ( results.updated(offer, msg),
+            offers.filterNot(_ == offer))
       }
+      gatherResponses(testProbe, newOffers, newResults, ignore)
     }
   }
 
@@ -144,7 +148,14 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     case (reserve, create) =>
       MesosTestHelper.mergeReservation(offer, reserve, create)
   }
+
   val ignoreRevive: PartialFunction[Any,Boolean] = { case FrameworkActor.ReviveOffers => true }
+
+  def readConfig(configMD5: String): Map[String, String] =
+    TgzHelper.readTgz(getDecoder.decode(configMD5)).map {
+      case (k, v) => (k, new String(v, UTF_8))
+    }.toMap
+
 
   it("should launch a monitors on unique hosts") {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
@@ -231,12 +242,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     module.destroy(_ => true)
   }
 
-  def readConfig(configMD5: String): Map[String, String] =
-    TgzHelper.readTgz(getDecoder.decode(configMD5)).map {
-      case (k, v) => (k, new String(v, UTF_8))
-    }.toMap
-
-  it("should launch OSDs") {
+  trait OneMonitorRunning {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
     val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
     val monitorNode = CephNode(
@@ -244,9 +250,11 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       cluster = "ceph",
       role = NodeRole.Monitor,
       lastLaunched = Some(RunState.Running),
+      goal = Some(RunState.Running),
       reservationConfirmed = true,
       slaveId = Some("slave-12"),
       location = Some(monLocation))
+    val monitorNodeTaskId = model.NodeState.makeTaskId(monitorNode.role, monitorNode.cluster, monitorNode.id)
 
     val module = new TestBindings {
       bind [KVStore] to {
@@ -278,35 +286,102 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         val taskStatus = r.tasks.head
         taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
     }
-    updateConfig("deployment.osd.count = 1")
-    probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
+  }
 
-    val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).
-      addResources(newScalarResource(
-        DISK, 1024000.0, disk = Some(MesosTestHelper.mountDisk("/mnt/ssd-1")))).build
-    taskActor ! FrameworkActor.ResourceOffers(List(offer))
+  it("should launch OSDs") {
+    new OneMonitorRunning {
+      import module.injector
+      updateConfig("deployment.osd.count = 1")
+      probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
 
-    val reservedOffer = inside(gatherResponse(probe, offer, ignoreRevive))(handleReservationResponse(offer))
+      val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).
+        addResources(newScalarResource(
+          DISK, 1024000.0, disk = Some(MesosTestHelper.mountDisk("/mnt/ssd-1")))).build
+      taskActor ! FrameworkActor.ResourceOffers(List(offer))
 
-    reservedOffer.resources.filter(_.getName == DISK).head.getScalar.getValue shouldBe 1024000.0
+      val reservedOffer = inside(gatherResponse(probe, offer, ignoreRevive))(handleReservationResponse(offer))
 
-    taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+      reservedOffer.resources.filter(_.getName == DISK).head.getScalar.getValue shouldBe 1024000.0
 
-    inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
-      case offerResponse: FrameworkActor.AcceptOffer =>
-        offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
-        val List(task) = offerResponse.operations(0).getLaunch.tasks
-        val shCommand = task.getCommand.getValue
-        shCommand.contains("entrypoint.sh osd_directory") shouldBe true
-        val config = readConfig(task.getCommand.getEnvironment.get("CEPH_CONFIG_TGZ").get)
-        val cephConfig = config("etc/ceph/ceph.conf")
-        cephConfig.lines.filter(_.contains("ms_bind_port")).toList shouldBe List(
-          "ms_bind_port_min = 31000",
-          "ms_bind_port_max = 31004")
-        cephConfig.lines.filter(_.startsWith("mon")).take(3).toList shouldBe List(
-          s"mon initial members = ${monLocation.hostname}",
-          s"mon host = ${monLocation.hostname}:${monLocation.port}",
-          s"mon addr = ${monLocation.ip}:${monLocation.port}")
+      taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+
+      inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
+        case offerResponse: FrameworkActor.AcceptOffer =>
+          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+          val List(task) = offerResponse.operations(0).getLaunch.tasks
+          val shCommand = task.getCommand.getValue
+          shCommand.contains("entrypoint.sh osd_directory") shouldBe true
+          val config = readConfig(task.getCommand.getEnvironment.get("CEPH_CONFIG_TGZ").get)
+          val cephConfig = config("etc/ceph/ceph.conf")
+          cephConfig.lines.filter(_.contains("ms_bind_port")).toList shouldBe List(
+            "ms_bind_port_min = 31000",
+            "ms_bind_port_max = 31004")
+          cephConfig.lines.filter(_.startsWith("mon")).take(3).toList shouldBe List(
+            s"mon initial members = ${monLocation.hostname}",
+            s"mon host = ${monLocation.hostname}:${monLocation.port}",
+            s"mon addr = ${monLocation.ip}:${monLocation.port}")
+      }
+    }
+  }
+
+
+  it("should kill a task in response to a goal change") {
+    new OneMonitorRunning {
+      import module.injector
+
+      val taskKilledStatusUpdate = newTaskStatus(monitorNodeTaskId, monitorNode.slaveId.get,
+        state = Protos.TaskState.TASK_KILLED)
+      val taskRunningStatusUpdate = newTaskStatus(monitorNodeTaskId, monitorNode.slaveId.get,
+        state = Protos.TaskState.TASK_RUNNING)
+
+      taskActor ! TaskActor.UpdateGoal(monitorNodeTaskId, model.RunState.Paused)
+
+      inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
+        case FrameworkActor.KillTask(taskId) =>
+          taskId.getValue shouldBe monitorNodeTaskId
+      }
+
+      taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)
+
+      val offerOperations = inject[OfferOperations]
+      val reservedOffer = MesosTestHelper.makeBasicOffer(
+        slaveId = 12,
+        role = "ceph",
+        reservationLabels = Some(newLabels(
+          Constants.FrameworkIdLabel -> MesosTestHelper.frameworkID.getValue,
+          Constants.TaskIdLabel -> monitorNodeTaskId))).
+        build
+
+      taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+
+      inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
+        case offerResponse: FrameworkActor.AcceptOffer =>
+          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+          val List(task) = offerResponse.operations(0).getLaunch.tasks
+          val shCommand = task.getCommand.getValue
+          shCommand.contains("sleep ") shouldBe true
+      }
+
+      taskActor ! TaskActor.UpdateGoal(monitorNodeTaskId, model.RunState.Running)
+
+      taskActor ! FrameworkActor.StatusUpdate(taskRunningStatusUpdate)
+
+      inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
+        case FrameworkActor.KillTask(taskId) =>
+          taskId.getValue shouldBe monitorNodeTaskId
+      }
+
+      taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)
+
+      taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
+
+      inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
+        case offerResponse: FrameworkActor.AcceptOffer =>
+          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+          val List(task) = offerResponse.operations(0).getLaunch.tasks
+          val shCommand = task.getCommand.getValue
+          shCommand.contains("entrypoint.sh mon") shouldBe true
+      }
     }
   }
 }

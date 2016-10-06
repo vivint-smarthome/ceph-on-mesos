@@ -52,6 +52,7 @@ object NodeFSM {
   }
 
   case class Persist(data: CephNode) extends Action
+  case object KillTask extends Action
   case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
   case object WantOffers extends Action
   case class OfferResponse(offer: PendingOffer, operations: Iterable[Offer.Operation]) extends Action
@@ -77,6 +78,7 @@ trait Directives {
   final val multi = ActionList(_)
   final val wantOffers = WantOffers
   final val offerResponse = OfferResponse(_, _)
+  final val killTask = KillTask
 }
 
 object Directives extends Directives
@@ -132,6 +134,7 @@ object Behavior {
   val timerId = new AtomicInteger
   type BehaviorFactory = (String, ActorContext) => Behavior
   type DecideFunction = (NodeState, Map[String, NodeState]) => Directive
+  type TransitionFunction = (NodeState, Map[String, NodeState]) => BehaviorFactory
 }
 
 trait BehaviorSet {

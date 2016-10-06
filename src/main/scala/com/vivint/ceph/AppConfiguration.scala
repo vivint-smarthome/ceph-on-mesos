@@ -3,7 +3,6 @@ package com.vivint.ceph
 import com.typesafe.config.ConfigFactory
 import org.rogach.scallop._
 import scala.concurrent.duration._
-import AppConfiguration.config
 
 class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
   val master = opt[String]("master", 'm',
@@ -76,15 +75,13 @@ case class AppConfiguration(
   clusterNetwork: String,
   storageBackend: String,
   failoverTimeout: Long = 31536000L,
-  apiPort: Int = config.getInt("api.port"),
-  apiHost: String = config.getString("api.host")
+  apiPort: Int = 8080,
+  apiHost: String = "127.0.0.1"
 ) {
   require(AppConfiguration.validStorageBackends.contains(storageBackend))
 }
 
 object AppConfiguration {
-  val config = ConfigFactory.load
-
   val validStorageBackends = Set("zookeeper", "file", "memory")
   def fromOpts(o: CephFrameworkOptions): AppConfiguration = {
     AppConfiguration(

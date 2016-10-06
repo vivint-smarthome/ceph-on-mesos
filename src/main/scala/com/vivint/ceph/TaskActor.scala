@@ -25,6 +25,8 @@ import scaldi.Injector
 object TaskActor {
   sealed trait Command
   case object GetTasks extends Command
+  case class UpdateGoal(taskId: String, goal: RunState.EnumVal) extends Command
+
   case class InitialState(
     nodes: Seq[CephNode],
     frameworkId: FrameworkID,
@@ -119,6 +121,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   final def processEvents(node: NodeState, events: List[NodeFSM.Event]): NodeState = events match {
     case event :: rest =>
+      log.debug("{} - sending event {}", node.taskId, event.getClass.getName)
+
       processEvents(
         processDirective(
           node,
@@ -140,6 +144,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   final def processAction(node: NodeState, action: NodeFSM.Action): NodeState = {
+    log.debug("{} - processing directive response action {}", node.taskId, action.getClass.getName)
     action match {
       case NodeFSM.Hold(offer, resourceMatch) =>
         // Decline existing held offer
@@ -148,21 +153,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         }
         node.copy(heldOffer = Some((offer, resourceMatch)))
       case NodeFSM.Persist(data) =>
-        if (node.persistentState == Some(data))
-          node
-        else {
-          import context.dispatcher
-          val nextVersion = node.version + 1
-          taskStore.save(data).map(_ => PersistSuccess(node.taskId, nextVersion)) pipeTo self
-          node.copy(
-            version = nextVersion,
-            persistentState = Some(data))
-        }
+        node.copy(persistentState = Some(data))
       case NodeFSM.WantOffers =>
         throttledRevives.offer(())
         node.copy(
           wantingNewOffer = true,
           offerMatcher = offerMatchers.get(node.role))
+      case NodeFSM.KillTask =>
+        frameworkActor ! FrameworkActor.KillTask(newTaskId(node.taskId))
+        node
       case NodeFSM.OfferResponse(pendingOffer, operations) =>
         pendingOffer.resultingOperationsPromise.success(operations.toList)
         node
@@ -200,7 +199,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       val newNodes = persistentNodeStates.map { p =>
         initializeBehavior(NodeState.fromState(p))
       }
-      nodes = newNodes.map { node => node.taskId -> node }(breakOut)
+      newNodes.foreach(updateNode)
 
       unstashAll()
       startReconciliation()
@@ -275,10 +274,29 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
-  // def reconciling(taskIdsForReconciliation: Set[String]): Receive =
+  /** Given an updated node status, persists if persistance has changed (further mondifying the nextVersion).
+    * Returns the modified version.
+    *
+    * TODO - Extract and lock down valid operations. Nobody should be able to update the node state without going
+    * through this method.
+    */
+  def updateNode(update: NodeState): NodeState = {
+    val nextNode =
+      if (nodes.get(update.taskId).flatMap(_.persistentState) != update.persistentState) {
+        import context.dispatcher
+        val nextVersion = update.version + 1
+        taskStore.save(update.pState).map(_ => PersistSuccess(update.taskId, nextVersion)) pipeTo self
+        update.copy(
+          version = nextVersion)
+      } else {
+        update
+      }
 
-  def updateNode(node: NodeState): Unit =
-    nodes = nodes.updated(node.taskId, node)
+    if (log.isDebugEnabled)
+    log.debug("node updated: {}", model.PlayJsonFormats.NodeStateWriter.writes(nextNode))
+    nodes = nodes.updated(update.taskId, nextNode)
+    nextNode
+  }
 
   /** Looking at reservation labels, routes the offer to the appropriate
     *
@@ -300,8 +318,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     trying to grow in resources. That's not a supported use case right now. At the point it is supported, we can do
     mapping / grouping */
     val operations = reservedGroupings.map {
-      case ((Some(taskId), Some(OurFrameworkId())), resources) if nodes.contains(taskId) =>
+      case ((Some(taskId), Some(OurFrameworkId())), resources)
+          if nodes.get(taskId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
+        println("********************************************************************************")
+        println(s"Le resident offer ${offer}")
         val node = nodes(taskId)
+        println(model.PlayJsonFormats.NodeStateWriter.writes( node))
         val pendingOffer = PendingOffer(offer.withResources(resources))
 
         updateNode(
@@ -348,8 +370,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       case FrameworkActor.StatusUpdate(taskStatus) if nodes contains taskStatus.getTaskId.getValue =>
         val priorState = nodes(taskStatus.getTaskId.getValue)
         val nextState = priorState.copy(taskStatus = Some(taskStatus))
-        updateNode(nextState)
-        processEvents(nextState, List(NodeFSM.NodeUpdated(priorState)))
+        updateNode(
+          processEvents(nextState, List(NodeFSM.NodeUpdated(priorState))))
 
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { offer =>
@@ -374,6 +396,17 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       cmd match {
         case GetTasks =>
           sender ! nodes
+
+        case UpdateGoal(taskId, goal) =>
+          nodes.get(taskId) foreach {
+            case node if node.persistentState.isEmpty || node.pState.goal.isEmpty =>
+              log.error("Unabled to update run goal for taskId {}; it is not ready", taskId)
+            case node =>
+              val nextNode = node.copy(persistentState = Some(node.pState.copy(goal = Some(goal))))
+              updateNode(
+                processEvents(
+                  nextNode, List(NodeFSM.NodeUpdated(node))))
+          }
       }
 
     case FrameworkActor.Connected =>
@@ -417,14 +450,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     log.info("added {} new monitors, {} new OSDs as a result of config update", newMonitors.length, newOSDs.length)
 
-    nodes = nodes ++ (newMonitors ++ newOSDs).map { m => m.taskId -> m }
+    (newMonitors ++ newOSDs).map(updateNode)
     offerMatchers = offerMatchFactory(cephConfig)
 
     var matchersUpdated = false
     nodes.foreach { case (taskId, node) =>
       if (node.wantingNewOffer) {
         matchersUpdated = true
-        nodes = nodes.updated(taskId, node.copy(offerMatcher = offerMatchers.get(node.role)))
+        updateNode(
+          node.copy(offerMatcher = offerMatchers.get(node.role)))
       }
     }
     if (matchersUpdated) {

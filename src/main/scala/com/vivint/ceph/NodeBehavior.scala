@@ -33,7 +33,7 @@ class NodeBehavior(
     import Directives._
     state.persistentState match {
       case None =>
-        persist(state.inferPersistedState).
+        persist(state.pState).
           withTransition(
             WaitForSync(decideWhatsNext))
       case Some(pState) if state.version != state.persistentVersion =>
@@ -166,6 +166,31 @@ class NodeBehavior(
     }
   }
 
+  case class KillTask(duration: FiniteDuration, andThen: TransitionFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
+    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+      if (state.runningState.isEmpty)
+        throw new IllegalStateException("can't kill a non-running task")
+
+      setBehaviorTimer("timeout", duration)
+      killTask
+    }
+
+    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+      event match {
+        case Timer("timeout") =>
+          preStart(state, fullState)
+        case Timer(_) =>
+          stay
+        case NodeUpdated(_) =>
+          if (state.runningState.isEmpty)
+            transition(andThen(state, fullState))
+          else
+            stay
+        case MatchedOffer(offer, matchResult) =>
+          hold(offer, matchResult)
+      }
+    }
+  }
 
   case class Running(taskId: String, actorContext: ActorContext) extends Behavior {
     def reservationConfirmed(state:NodeState) =
@@ -177,29 +202,45 @@ class NodeBehavior(
     override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
       if(! reservationConfirmed(state))
         throw new IllegalStateException("Can't go to running state without a confirmed reservation")
+      nextRunAction(state, fullState)
+    }
 
-      /* TODO - move this logic to orchestrator */
-      val monitors = getMonitors(fullState)
-      lazy val runningMonitors = monitors.filter(_.runningState == Some(RunState.Running)).toList
-      lazy val quorum = runningMonitors.length > (monitors.length / 2.0)
-      def becomeRunning =
-        persist(state.pState.copy(goal = state.pState.goal.orElse(Some(RunState.Running))))
-      def poll =
-        transition(Sleep(5.seconds, { (_, _) => transition(Running) }))
+    def nextRunAction(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+      (state.lastLaunched, state.runningState, state.goal) match {
+        case (None, None, None) =>
+          // This is our first launch. See if it's okay to initialize. This is where we implement the behavior for tasks
+          // to wait for monitors to run
+          /* TODO - move this logic to orchestrator!!! */
+          val monitors = getMonitors(fullState)
+          lazy val runningMonitors = monitors.filter(_.runningState == Some(RunState.Running)).toList
+          lazy val quorumMonitorsAreRunning =
+            runningMonitors.length > (monitors.length / 2) // NOTE this always fails for mon count [0, 1]
+          def becomeRunning =
+            persist(state.pState.copy(goal = Some(RunState.Running)))
+          def poll =
+            transition(Sleep(5.seconds, { (_, _) => transition(Running) }))
 
-      state.role match {
-        case NodeRole.Monitor =>
-          if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) // am I the first or are others running?
-            becomeRunning
-          else {
-            poll
+          state.role match {
+            case NodeRole.Monitor if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) =>
+              // am I the first or are others running?
+              becomeRunning
+            case _ if (quorumMonitorsAreRunning) =>
+              becomeRunning
+            case _ =>
+              poll
           }
 
-        case _ =>
-          if (quorum)
-            becomeRunning
-          else
-            poll
+        case (_, Some(running), Some(goal)) if running != goal =>
+          // current running state does not match goal
+          transition(KillTask(70.seconds, { (_, _) => Running }))
+
+        case (_, _, Some(_)) =>
+          // if we already have a goal then proceed
+          stay
+        case (Some(launched), _, None) =>
+          val jsonRepresentation = model.PlayJsonFormats.NodeStateWriter.writes(state)
+          throw new IllegalStateException(
+            s"Can't have launched something without a goal: launched = ${launched}; state = ${jsonRepresentation}")
       }
     }
 
@@ -208,6 +249,13 @@ class NodeBehavior(
         case Timer(_) =>
           stay
         case MatchedOffer(pendingOffer, _) =>
+          println(s"Le offer!${pendingOffer.offer}")
+          if (state.runningState.nonEmpty)
+            /* We shouldn't get the persistent offer for a task unless if the task is dead, so we shouldn't have to
+             * worry about this. Unless if two persistent offers were made for a task, on the same slave... which semes
+             * very unlikely */
+            throw new IllegalStateException("As assumption made by the framework author was wrong")
+
           if(!pendingOffer.offer.resources.exists(_.hasReservation))
             offerResponse(pendingOffer, Nil)
           else {
@@ -255,17 +303,9 @@ class NodeBehavior(
                 // hold(pendingOffer, None)
             }
           }
-
-        case n: NodeUpdated if state.taskStatus.isEmpty =>
-          stay
-        case n: NodeUpdated =>
-          val status = state.taskStatus.get
-          status.getState match {
-            case Protos.TaskState.TASK_RUNNING =>
-              stay
-            case _ =>
-              stay
-          }
+        case NodeUpdated(_) =>
+          // if the goal has changed then we need to revaluate our next run state
+          nextRunAction(state, fullState)
       }
     }
   }
@@ -325,13 +365,20 @@ class NodeBehavior(
       nodeLocation = nodeLocation,
       templatesTgz = templatesTgz,
       command =
-        s"""
-        |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
-        |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
-        |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
-        |${pullMonMapCommand}
-        |/entrypoint.sh mon
-        |""".stripMargin)
+        runState match {
+          case RunState.Running =>
+            s"""
+            |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
+            |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
+            |${pullMonMapCommand}
+            |/entrypoint.sh mon
+            |""".stripMargin
+          case RunState.Paused =>
+            s"""
+            |sleep 86400
+            |""".stripMargin
+        }
+    )
 
     List(
       newOfferOperation(
@@ -363,27 +410,35 @@ class NodeBehavior(
       nodeLocation = nodeLocation,
       templatesTgz = templatesTgz,
       command =
-        s"""
-        |if [ "$$(df -T /var/lib/ceph | tail -n 1 | awk '{print $$2}')" != "xfs" ]; then
-        |  echo "Cowardly refusing to OSD start on non-xfs volume."
-        |  echo "Cowardly refusing to OSD start on non-xfs volume." 1>&2
-        |  echo "Please see http://docs.ceph.com/docs/jewel/rados/configuration/filesystem-recommendations/#not-recommended for more information"
-        |  sleep 60
-        |  exit
-        |fi
-        |set -x -e
-        |echo "Pulling monitor map"
-        |ceph mon getmap -o /etc/ceph/monmap-ceph
-        |
-        |if [ ! -f /etc/ceph/my_osd_id ]; then
-        |  ceph osd create > /etc/ceph/my_osd_id
-        |fi
-        |OSD_ID=$$(cat /etc/ceph/my_osd_id)
-        |mkdir -p /var/lib/ceph/osd/ceph-$${OSD_ID}
-        |chown ceph:ceph /var/lib/ceph/osd/ceph-$${OSD_ID}
-        |
-        |/entrypoint.sh osd_directory
-        |""".stripMargin)
+        runState match {
+          case RunState.Running =>
+            s"""
+            |if [ "$$(df -T /var/lib/ceph | tail -n 1 | awk '{print $$2}')" != "xfs" ]; then
+            |  echo "Cowardly refusing to OSD start on non-xfs volume."
+            |  echo "Cowardly refusing to OSD start on non-xfs volume." 1>&2
+            |  echo "Please see http://docs.ceph.com/docs/jewel/rados/configuration/filesystem-recommendations/#not-recommended for more information"
+            |  sleep 60
+            |  exit
+            |fi
+            |set -x -e
+            |echo "Pulling monitor map"
+            |ceph mon getmap -o /etc/ceph/monmap-ceph
+            |
+            |if [ ! -f /etc/ceph/my_osd_id ]; then
+            |  ceph osd create > /etc/ceph/my_osd_id
+            |fi
+            |OSD_ID=$$(cat /etc/ceph/my_osd_id)
+            |mkdir -p /var/lib/ceph/osd/ceph-$${OSD_ID}
+            |chown ceph:ceph /var/lib/ceph/osd/ceph-$${OSD_ID}
+            |
+            |/entrypoint.sh osd_directory
+            |""".stripMargin
+          case RunState.Paused =>
+            s"""
+            |sleep 86400
+            |""".stripMargin
+        }
+    )
 
     List(
       newOfferOperation(
