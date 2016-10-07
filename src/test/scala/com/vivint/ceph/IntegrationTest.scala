@@ -1,10 +1,12 @@
 package com.vivint.ceph
 
 import akka.actor.{ ActorRef, ActorSystem, PoisonPill, Props }
+import akka.pattern.ask
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
 import akka.testkit.TestKit
 import akka.testkit.TestProbe
+import akka.util.Timeout
 import com.typesafe.config.{ Config, ConfigFactory, ConfigRenderOptions }
 import java.io.File
 import java.nio.charset.StandardCharsets.UTF_8
@@ -19,7 +21,7 @@ import org.scalatest.exceptions.TestFailedException
 import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.lib.TgzHelper
-import com.vivint.ceph.model.{ PersistentState, TaskRole, RunState, ServiceLocation }
+import com.vivint.ceph.model.{ PersistentState, TaskRole, Task, RunState, ServiceLocation }
 import com.vivint.ceph.views.ConfigTemplates
 import scala.annotation.tailrec
 import scala.collection.breakOut
@@ -383,5 +385,68 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           shCommand.contains("entrypoint.sh mon") shouldBe true
       }
     }
+  }
+
+  it("should require that the first monitor is running before launching another") {
+    implicit val ec: ExecutionContext = SameThreadExecutionContext
+    val module = new TestBindings {}
+    import module.injector
+
+    val taskActor = inject[ActorRef](classOf[TaskActor])
+    val probe = inject[TestProbe]
+    implicit val sender = probe.ref
+
+    inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
+
+    val kvStore = inject[KVStore]
+    val configStore = new ConfigStore(inject[KVStore])
+    implicit val materializer = ActorMaterializer()
+
+    // Wait for configuration update
+    val config = await(cephConfUpdates.runWith(Sink.head))
+
+    updateConfig("deployment.mon.count = 2")
+
+    probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
+
+    val offers = List(
+      MesosTestHelper.makeBasicOffer(slaveId = 0).build,
+      MesosTestHelper.makeBasicOffer(slaveId = 1).build)
+
+    // Send an offer!
+    taskActor ! FrameworkActor.ResourceOffers(offers)
+
+    val responses = gatherResponses(probe, offers, ignore = ignoreRevive)
+
+    val List(reservationOffer, reservationOffer2) = responses.map { case (offer, response) =>
+      inside(response)(handleReservationResponse(offer))
+    }.toList
+
+    taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer, reservationOffer2))
+
+
+    val launchedTaskId = inside(gatherResponse(probe, reservationOffer, ignoreRevive)) {
+      case offerResponse: FrameworkActor.AcceptOffer =>
+        offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+        val List(task) = offerResponse.operations(0).getLaunch.tasks
+        val shCommand = task.getCommand.getValue
+        shCommand.contains("entrypoint.sh mon") shouldBe true
+        shCommand.contains("ceph mon getmap") shouldBe false
+        task.getTaskId.getValue
+    }
+
+    implicit val timeout = Timeout(3.seconds)
+
+    val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetTasks).mapTo[Map[String, Task]]).
+      values.
+      partition(_.taskId == launchedTaskId)
+
+    unlaunchedTask.behavior.name shouldBe ("Sleep")
+
+    taskActor ! TaskActor.TaskTimer(unlaunchedTask.taskId, "wakeup")
+
+    val snapshotAfterWake = await((taskActor ? TaskActor.GetTasks).mapTo[Map[String, Task]])(unlaunchedTask.taskId)
+
+    unlaunchedTask.behavior.name shouldBe ("Sleep")
   }
 }
