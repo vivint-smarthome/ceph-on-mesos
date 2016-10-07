@@ -36,19 +36,19 @@ object PlayJsonFormats{
   }
 
   implicit val RunStateFormat = enumFormat(RunState)
-  implicit val NodeRoleFormat = enumFormat(NodeRole)
+  implicit val TaskRoleFormat = enumFormat(TaskRole)
   implicit val ServiceLocationFormat = Json.format[ServiceLocation]
-  implicit val MonTaskFormat = Json.format[CephNode]
+  implicit val MonTaskFormat = Json.format[PersistentState]
   implicit val ClusterSecretsFormat = Json.format[ClusterSecrets]
 
-  implicit val NodeStateWriter = Writes[NodeState] { node =>
-    Json.toJson(node.pState).as[JsObject] ++
+  implicit val TaskWriter = Writes[Task] { task =>
+    Json.toJson(task.pState).as[JsObject] ++
     Json.obj(
-      "version" -> node.version,
-      "persistentVersion" -> node.persistentVersion,
-      "behavior" -> node.behavior.name,
-      "wantingNewOffer" -> node.wantingNewOffer,
-      "taskStatus" -> node.taskStatus.map(_.getState.getValueDescriptor.getName)
+      "version" -> task.version,
+      "persistentVersion" -> task.persistentVersion,
+      "behavior" -> task.behavior.name,
+      "wantingNewOffer" -> task.wantingNewOffer,
+      "taskStatus" -> task.taskStatus.map(_.getState.getValueDescriptor.getName)
     )
 
   }

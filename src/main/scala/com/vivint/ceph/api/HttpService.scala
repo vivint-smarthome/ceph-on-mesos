@@ -36,8 +36,8 @@ class HttpService(implicit inj: Injector) {
         complete((400, s"Error parsing: ${ex.getMessage}"))
     }
 
-  def getTasks: Future[Map[String, model.NodeState]] =
-    (taskActor ? TaskActor.GetTasks).mapTo[Map[String, model.NodeState]]
+  def getTasks: Future[Map[String, model.Task]] =
+    (taskActor ? TaskActor.GetTasks).mapTo[Map[String, model.Task]]
 
   def findTaskByUUID(id: UUID) =
     getTasks.map { _.values.find(_.id == id) }

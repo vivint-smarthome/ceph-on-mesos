@@ -19,7 +19,7 @@ import org.scalatest.exceptions.TestFailedException
 import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.lib.TgzHelper
-import com.vivint.ceph.model.{ CephNode, NodeRole, RunState, ServiceLocation }
+import com.vivint.ceph.model.{ PersistentState, TaskRole, RunState, ServiceLocation }
 import com.vivint.ceph.views.ConfigTemplates
 import scala.annotation.tailrec
 import scala.collection.breakOut
@@ -245,22 +245,22 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
   trait OneMonitorRunning {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
     val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
-    val monitorNode = CephNode(
+    val monitorTask = PersistentState(
       id = UUID.randomUUID(),
       cluster = "ceph",
-      role = NodeRole.Monitor,
+      role = TaskRole.Monitor,
       lastLaunched = Some(RunState.Running),
       goal = Some(RunState.Running),
       reservationConfirmed = true,
       slaveId = Some("slave-12"),
       location = Some(monLocation))
-    val monitorNodeTaskId = model.NodeState.makeTaskId(monitorNode.role, monitorNode.cluster, monitorNode.id)
+    val monitorTaskTaskId = model.Task.makeTaskId(monitorTask.role, monitorTask.cluster, monitorTask.id)
 
     val module = new TestBindings {
       bind [KVStore] to {
         val store = new kvstore.MemStore
         val taskStore = new TaskStore(store)
-        taskStore.save(monitorNode)
+        taskStore.save(monitorTask)
         store
       }
     }
@@ -329,16 +329,16 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     new OneMonitorRunning {
       import module.injector
 
-      val taskKilledStatusUpdate = newTaskStatus(monitorNodeTaskId, monitorNode.slaveId.get,
+      val taskKilledStatusUpdate = newTaskStatus(monitorTaskTaskId, monitorTask.slaveId.get,
         state = Protos.TaskState.TASK_KILLED)
-      val taskRunningStatusUpdate = newTaskStatus(monitorNodeTaskId, monitorNode.slaveId.get,
+      val taskRunningStatusUpdate = newTaskStatus(monitorTaskTaskId, monitorTask.slaveId.get,
         state = Protos.TaskState.TASK_RUNNING)
 
-      taskActor ! TaskActor.UpdateGoal(monitorNodeTaskId, model.RunState.Paused)
+      taskActor ! TaskActor.UpdateGoal(monitorTaskTaskId, model.RunState.Paused)
 
       inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
         case FrameworkActor.KillTask(taskId) =>
-          taskId.getValue shouldBe monitorNodeTaskId
+          taskId.getValue shouldBe monitorTaskTaskId
       }
 
       taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)
@@ -349,7 +349,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         role = "ceph",
         reservationLabels = Some(newLabels(
           Constants.FrameworkIdLabel -> MesosTestHelper.frameworkID.getValue,
-          Constants.TaskIdLabel -> monitorNodeTaskId))).
+          Constants.TaskIdLabel -> monitorTaskTaskId))).
         build
 
       taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
@@ -362,13 +362,13 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           shCommand.contains("sleep ") shouldBe true
       }
 
-      taskActor ! TaskActor.UpdateGoal(monitorNodeTaskId, model.RunState.Running)
+      taskActor ! TaskActor.UpdateGoal(monitorTaskTaskId, model.RunState.Running)
 
       taskActor ! FrameworkActor.StatusUpdate(taskRunningStatusUpdate)
 
       inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
         case FrameworkActor.KillTask(taskId) =>
-          taskId.getValue shouldBe monitorNodeTaskId
+          taskId.getValue shouldBe monitorTaskTaskId
       }
 
       taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)

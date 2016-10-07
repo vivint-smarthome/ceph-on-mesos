@@ -5,21 +5,21 @@ import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo, DiskT
 import mesosphere.mesos.matcher.{ DiskResourceMatcher, ResourceMatcher, ScalarMatchResult, ScalarResourceMatcher }
 import mesosphere.mesos.protos.Resource.{CPUS, MEM, DISK, PORTS}
 import org.apache.mesos.Protos
-import com.vivint.ceph.model.{ CephConfig, NodeState, NodeRole }
+import com.vivint.ceph.model.{ CephConfig, Task, TaskRole }
 import OfferMatchFactory.{OfferMatcher, getPeers, peersAssignedToSlave}
 import scaldi.Injector
 import scaldi.Injectable._
 
 object OfferMatchFactory {
-  type OfferMatcher = (Protos.Offer, NodeState, Iterable[NodeState]) => Option[ResourceMatcher.ResourceMatch]
-  def getPeers(node: NodeState, allNodes: Iterable[NodeState]): Stream[NodeState] = {
-    allNodes.toStream.filter { other =>
-      other.id != node.id && other.role == node.role
+  type OfferMatcher = (Protos.Offer, Task, Iterable[Task]) => Option[ResourceMatcher.ResourceMatch]
+  def getPeers(task: Task, allTasks: Iterable[Task]): Stream[Task] = {
+    allTasks.toStream.filter { other =>
+      other.id != task.id && other.role == task.role
     }
   }
 
-  def peersAssignedToSlave(slaveId: Protos.SlaveID, node: NodeState, allNodes: Iterable[NodeState]): Int = {
-    val peers = getPeers(node, allNodes)
+  def peersAssignedToSlave(slaveId: Protos.SlaveID, task: Task, allTasks: Iterable[Task]): Int = {
+    val peers = getPeers(task, allTasks)
     val offerSlaveId = slaveId.getValue
     peers.map(_.pState.slaveId).collect {
       case Some(peerSlaveId) if peerSlaveId == offerSlaveId => 1
@@ -27,7 +27,7 @@ object OfferMatchFactory {
   }
 }
 
-trait OfferMatchFactory extends (CephConfig => Map[NodeRole.EnumVal, OfferMatcher]) {
+trait OfferMatchFactory extends (CephConfig => Map[TaskRole.EnumVal, OfferMatcher]) {
 }
 
 class OSDOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends OfferMatcher {
@@ -56,8 +56,8 @@ class OSDOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
         selector))
   }
 
-  def apply(offer: Protos.Offer, node: NodeState, allNodes: Iterable[NodeState]): Option[ResourceMatcher.ResourceMatch] = {
-    val count = peersAssignedToSlave(offer.getSlaveId, node, allNodes)
+  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+    val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
     if (count < cephConfig.deployment.osd.max_per_host) {
       ResourceMatcher.matchResources(offer, resourceMatchers, selector)
     } else {
@@ -91,8 +91,8 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
         selector))
   }
 
-  def apply(offer: Protos.Offer, node: NodeState, allNodes: Iterable[NodeState]): Option[ResourceMatcher.ResourceMatch] = {
-    val count = peersAssignedToSlave(offer.getSlaveId, node, allNodes)
+  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+    val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
     if (count < cephConfig.deployment.mon.max_per_host) {
       ResourceMatcher.matchResources(offer, resourceMatchers, selector)
     } else {
@@ -104,10 +104,10 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
 class MasterOfferMatchFactory(implicit inj: Injector) extends OfferMatchFactory {
   val config = inject[AppConfiguration]
 
-  def apply(cephConfig: CephConfig): Map[NodeRole.EnumVal, OfferMatcher] = {
+  def apply(cephConfig: CephConfig): Map[TaskRole.EnumVal, OfferMatcher] = {
     Map(
-      NodeRole.Monitor -> (new MonOfferMatcher(cephConfig, frameworkRole = config.role)),
-      NodeRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role))
+      TaskRole.Monitor -> (new MonOfferMatcher(cephConfig, frameworkRole = config.role)),
+      TaskRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role))
     )
   }
 }

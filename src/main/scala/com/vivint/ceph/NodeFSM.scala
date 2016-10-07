@@ -5,20 +5,20 @@ import java.util.concurrent.atomic.AtomicInteger
 import mesosphere.mesos.matcher.ResourceMatcher
 import mesosphere.mesos.protos.TaskStatus
 import org.apache.mesos.Protos.{FrameworkID, Offer}
-import com.vivint.ceph.model.{CephNode,NodeState}
-import NodeFSM._
+import com.vivint.ceph.model.{PersistentState,Task}
+import TaskFSM._
 import Behavior._
 import scala.annotation.tailrec
 import scala.concurrent.duration._
 import scala.collection.immutable.Iterable
 
-object NodeFSM {
+object TaskFSM {
   sealed trait Event
   /**
-    * external event caused the node state to change
+    * external event caused the task state to change
     */
-  case class NodeUpdated(prior: NodeState) extends Event {
-    def taskStatusChanged(current: NodeState): Boolean =
+  case class TaskUpdated(prior: Task) extends Event {
+    def taskStatusChanged(current: Task): Boolean =
       prior.taskStatus != current.taskStatus
   }
   case class MatchedOffer(offer: PendingOffer, matchResult: Option[ResourceMatcher.ResourceMatch]) extends Event
@@ -51,7 +51,7 @@ object NodeFSM {
     }
   }
 
-  case class Persist(data: CephNode) extends Action
+  case class Persist(data: PersistentState) extends Action
   case object KillTask extends Action
   case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
   case object WantOffers extends Action
@@ -94,11 +94,11 @@ trait Behavior extends Directives {
     import actorContext.dispatcher
     val timerId = Behavior.timerId.incrementAndGet()
     timers(timerId) = actorContext.system.scheduler.scheduleOnce(duration) {
-      actorContext.self ! TaskActor.NodeTimer(taskId, BehaviorTimer(timerId, id))
+      actorContext.self ! TaskActor.TaskTimer(taskId, BehaviorTimer(timerId, id))
     }
   }
 
-  @tailrec final def preHandleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+  @tailrec final def preHandleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
     event match {
       case Timer(BehaviorTimer(timerId, id)) =>
         if (timers.remove(timerId).isEmpty)
@@ -113,9 +113,9 @@ trait Behavior extends Directives {
     }
   }
 
-  final def initialize(state: NodeState, fullState: Map[String, NodeState]): Directive =
+  final def initialize(state: Task, fullState: Map[String, Task]): Directive =
     preStart(state, fullState)
-  final def submit(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive =
+  final def submit(event: Event, state: Task, fullState: Map[String, Task]): Directive =
     preHandleEvent(event, state, fullState)
   final def teardown(): Unit = {
     timers.values.foreach { _.cancel }
@@ -126,15 +126,15 @@ trait Behavior extends Directives {
   /**
     * Method provides an opportunity to set the next step
     */
-  protected def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = stay
-  protected def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive
+  protected def preStart(state: Task, fullState: Map[String, Task]): Directive = stay
+  protected def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
 }
 
 object Behavior {
   val timerId = new AtomicInteger
   type BehaviorFactory = (String, ActorContext) => Behavior
-  type DecideFunction = (NodeState, Map[String, NodeState]) => Directive
-  type TransitionFunction = (NodeState, Map[String, NodeState]) => BehaviorFactory
+  type DecideFunction = (Task, Map[String, Task]) => Directive
+  type TransitionFunction = (Task, Map[String, Task]) => BehaviorFactory
 }
 
 trait BehaviorSet {

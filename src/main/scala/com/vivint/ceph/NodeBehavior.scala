@@ -4,8 +4,8 @@ import akka.actor.{ ActorContext, Cancellable }
 import java.util.concurrent.atomic.AtomicInteger
 import mesosphere.mesos.protos.TaskStatus
 import org.apache.mesos.Protos
-import com.vivint.ceph.model.{ NodeRole, RunState, CephNode, CephConfig, NodeState, ServiceLocation }
-import NodeFSM._
+import com.vivint.ceph.model.{ TaskRole, RunState, PersistentState, CephConfig, Task, ServiceLocation }
+import TaskFSM._
 import Behavior._
 import scala.annotation.tailrec
 import scala.collection.immutable.NumericRange
@@ -18,7 +18,7 @@ import mesosphere.mesos.protos.Resource.PORTS
 import ProtoHelpers._
 import java.util.Base64
 
-class NodeBehavior(
+class TaskBehavior(
   secrets: ClusterSecrets,
   frameworkId: () => Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
@@ -29,7 +29,7 @@ class NodeBehavior(
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
 
-  def decideWhatsNext(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+  def decideWhatsNext(state: Task, fullState: Map[String, Task]): Directive = {
     import Directives._
     state.persistentState match {
       case None =>
@@ -52,27 +52,27 @@ class NodeBehavior(
   }
 
   case class InitializeLogic(taskId: String, actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
-      decideWhatsNext(state: NodeState, fullState: Map[String, NodeState]): Directive
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+      decideWhatsNext(state: Task, fullState: Map[String, Task]): Directive
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive =
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive =
       throw new IllegalStateException("handleEvent called on InitializeLogic")
   }
 
   case class WaitForSync(nextBehavior: DecideFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("timeout", 30.seconds)
       stay
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer("timeout") =>
           nextBehavior(state, fullState)
         case Timer(_) =>
           stay
-        case NodeUpdated(prior) =>
+        case TaskUpdated(prior) =>
           if (state.persistentVersion < state.version)
             stay
           else
@@ -84,15 +84,15 @@ class NodeBehavior(
   }
 
   case class Matching(taskId: String, actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       wantOffers
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer(_) =>
           stay
-        case NodeUpdated(_) =>
+        case TaskUpdated(_) =>
           stay
         case MatchedOffer(pendingOffer, matchResult) =>
           val resources = pendingOffer.offer.resources
@@ -121,12 +121,12 @@ class NodeBehavior(
   }
 
   case class WaitForReservation(taskId: String, actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("timeout", 30.seconds)
       stay
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer("timeout") =>
           transition(Matching)
@@ -142,23 +142,23 @@ class NodeBehavior(
           } else {
             hold(pendingOffer, matchResult).withTransition(Matching)
           }
-        case NodeUpdated(_) =>
+        case TaskUpdated(_) =>
           stay
       }
     }
   }
 
   case class Sleep(duration: FiniteDuration, andThen: DecideFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("wakeup", duration)
       stay
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer("wakeup") =>
           andThen(state, fullState)
-        case Timer(_) | NodeUpdated(_) =>
+        case Timer(_) | TaskUpdated(_) =>
           stay
         case MatchedOffer(offer, matchResult) =>
           hold(offer, matchResult)
@@ -167,7 +167,7 @@ class NodeBehavior(
   }
 
   case class KillTask(duration: FiniteDuration, andThen: TransitionFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       if (state.runningState.isEmpty)
         throw new IllegalStateException("can't kill a non-running task")
 
@@ -175,13 +175,13 @@ class NodeBehavior(
       killTask
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer("timeout") =>
           preStart(state, fullState)
         case Timer(_) =>
           stay
-        case NodeUpdated(_) =>
+        case TaskUpdated(_) =>
           if (state.runningState.isEmpty)
             transition(andThen(state, fullState))
           else
@@ -193,19 +193,19 @@ class NodeBehavior(
   }
 
   case class Running(taskId: String, actorContext: ActorContext) extends Behavior {
-    def reservationConfirmed(state:NodeState) =
+    def reservationConfirmed(state:Task) =
       state.pState.reservationConfirmed
 
-    def getMonitors(fullState: Map[String, NodeState]) =
-      fullState.values.filter(_.role == NodeRole.Monitor).toList
+    def getMonitors(fullState: Map[String, Task]) =
+      fullState.values.filter(_.role == TaskRole.Monitor).toList
 
-    override def preStart(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       if(! reservationConfirmed(state))
         throw new IllegalStateException("Can't go to running state without a confirmed reservation")
       nextRunAction(state, fullState)
     }
 
-    def nextRunAction(state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def nextRunAction(state: Task, fullState: Map[String, Task]): Directive = {
       (state.lastLaunched, state.runningState, state.goal) match {
         case (None, None, None) =>
           // This is our first launch. See if it's okay to initialize. This is where we implement the behavior for tasks
@@ -221,7 +221,7 @@ class NodeBehavior(
             transition(Sleep(5.seconds, { (_, _) => transition(Running) }))
 
           state.role match {
-            case NodeRole.Monitor if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) =>
+            case TaskRole.Monitor if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) =>
               // am I the first or are others running?
               becomeRunning
             case _ if (quorumMonitorsAreRunning) =>
@@ -238,13 +238,13 @@ class NodeBehavior(
           // if we already have a goal then proceed
           stay
         case (Some(launched), _, None) =>
-          val jsonRepresentation = model.PlayJsonFormats.NodeStateWriter.writes(state)
+          val jsonRepresentation = model.PlayJsonFormats.TaskWriter.writes(state)
           throw new IllegalStateException(
             s"Can't have launched something without a goal: launched = ${launched}; state = ${jsonRepresentation}")
       }
     }
 
-    def handleEvent(event: Event, state: NodeState, fullState: Map[String, NodeState]): Directive = {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer(_) =>
           stay
@@ -261,16 +261,16 @@ class NodeBehavior(
           else {
             lazy val peers = state.peers(fullState.values)
             lazy val monLocations: Set[ServiceLocation] = fullState.values.
-              filter(_.role == NodeRole.Monitor).
+              filter(_.role == TaskRole.Monitor).
               flatMap{_.pState.location}(breakOut)
-            lazy val nodeLocation = deriveLocation(pendingOffer.offer)
+            lazy val taskLocation = deriveLocation(pendingOffer.offer)
 
             (state.role, state.pState.goal) match {
-              case (NodeRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+              case (TaskRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
 
                 persist(
                   state.pState.copy(
-                    location = Some(nodeLocation),
+                    location = Some(taskLocation),
                     lastLaunched = Some(desiredState))).
                   andAlso(
                     offerResponse(
@@ -279,14 +279,14 @@ class NodeBehavior(
                         isLeader = peers.forall(_.pState.goal.isEmpty),
                         pendingOffer.offer,
                         state,
-                        nodeLocation = nodeLocation,
+                        taskLocation = taskLocation,
                         desiredState,
                         monLocations = monLocations
                       )))
-              case (NodeRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+              case (TaskRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
                 persist(
                   state.pState.copy(
-                    location = Some(nodeLocation),
+                    location = Some(taskLocation),
                     lastLaunched = Some(desiredState))).
                   andAlso(
                     offerResponse(
@@ -294,7 +294,7 @@ class NodeBehavior(
                       launchOSDCommand(
                         pendingOffer.offer,
                         state,
-                        nodeLocation = nodeLocation,
+                        taskLocation = taskLocation,
                         desiredState,
                         monLocations = monLocations)))
 
@@ -303,7 +303,7 @@ class NodeBehavior(
                 // hold(pendingOffer, None)
             }
           }
-        case NodeUpdated(_) =>
+        case TaskUpdated(_) =>
           // if the goal has changed then we need to revaluate our next run state
           nextRunAction(state, fullState)
       }
@@ -340,7 +340,7 @@ class NodeBehavior(
   }
 
   private def launchMonCommand(
-    isLeader: Boolean, offer: Protos.Offer, node: NodeState, nodeLocation: ServiceLocation,
+    isLeader: Boolean, offer: Protos.Offer, task: Task, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -355,20 +355,20 @@ class NodeBehavior(
 
     val templatesTgz = configTemplates.tgz(
       secrets = secrets,
-      monitors = (monLocations + nodeLocation),
+      monitors = (monLocations + taskLocation),
       cephSettings = deploymentConfig().settings)
 
     val taskInfo = launchCephCommand(
-      taskId = node.taskId,
-      role = node.role,
+      taskId = task.taskId,
+      role = task.role,
       offer = offer,
-      nodeLocation = nodeLocation,
+      taskLocation = taskLocation,
       templatesTgz = templatesTgz,
       command =
         runState match {
           case RunState.Running =>
             s"""
-            |sed -i "s/:6789/:${nodeLocation.port}/g" /entrypoint.sh config.static.sh
+            |sed -i "s/:6789/:${taskLocation.port}/g" /entrypoint.sh config.static.sh
             |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
             |${pullMonMapCommand}
             |/entrypoint.sh mon
@@ -386,7 +386,7 @@ class NodeBehavior(
   }
 
   private def launchOSDCommand(
-    offer: Protos.Offer, node: NodeState, nodeLocation: ServiceLocation,
+    offer: Protos.Offer, task: Task, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -404,10 +404,10 @@ class NodeBehavior(
       osdPort = Some(inferPortRange(offer.resources.toList)))
 
     val taskInfo = launchCephCommand(
-      taskId = node.taskId,
-      role = node.role,
+      taskId = task.taskId,
+      role = task.role,
       offer = offer,
-      nodeLocation = nodeLocation,
+      taskLocation = taskLocation,
       templatesTgz = templatesTgz,
       command =
         runState match {
@@ -445,8 +445,8 @@ class NodeBehavior(
         newLaunchOperation(Seq(taskInfo.build))))
   }
 
-  private def launchCephCommand(taskId: String, role: NodeRole.EnumVal, command: String, offer: Protos.Offer,
-    nodeLocation: ServiceLocation, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
+  private def launchCephCommand(taskId: String, role: TaskRole.EnumVal, command: String, offer: Protos.Offer,
+    taskLocation: ServiceLocation, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
@@ -478,8 +478,8 @@ class NodeBehavior(
       setTaskId(newTaskId(taskId)).
       setLabels(newLabels(
         Constants.FrameworkIdLabel -> frameworkId().getValue,
-        Constants.HostnameLabel -> nodeLocation.hostname,
-        Constants.PortLabel -> nodeLocation.port.toString)).
+        Constants.HostnameLabel -> taskLocation.hostname,
+        Constants.PortLabel -> taskLocation.port.toString)).
       setName(s"ceph-${role}").
       setContainer(container).
       setSlaveId(offer.getSlaveId).

@@ -3,38 +3,38 @@ package model
 
 import akka.actor.ActorContext
 import java.util.UUID
-import org.apache.mesos.Protos._
+import org.apache.mesos.Protos
 import mesosphere.mesos.matcher.ResourceMatcher
 
-case class NodeState(
+case class Task(
   id: UUID,
   cluster: String,
-  role: NodeRole.EnumVal,
+  role: TaskRole.EnumVal,
   version: Long = 0,
-  persistentState: Option[CephNode] = None,
+  persistentState: Option[PersistentState] = None,
   behavior: Behavior,
   persistentVersion: Long = 0,
   wantingNewOffer: Boolean = false,
   heldOffer: Option[(PendingOffer, Option[ResourceMatcher.ResourceMatch])] = None,
   offerMatcher: Option[OfferMatchFactory.OfferMatcher] = None,
-  taskStatus: Option[TaskStatus] = None
+  taskStatus: Option[Protos.TaskStatus] = None
 ) {
   if (wantingNewOffer)
     require(heldOffer.isEmpty, "cannot want offer and be holding an offer")
   def readyForOffer =
     wantingNewOffer && heldOffer.isEmpty && offerMatcher.nonEmpty
-  lazy val taskId = NodeState.makeTaskId(role, cluster, id)
+  lazy val taskId = Task.makeTaskId(role, cluster, id)
   taskStatus.foreach { s =>
-    require(s.getTaskId.getValue == taskId, "Critical error - TaskStatus must match generated node state")
+    require(s.getTaskId.getValue == taskId, "Critical error - TaskStatus must match generated task state")
   }
 
   lazy val pState = persistentState.getOrElse(
-    CephNode(
+    PersistentState(
       id = id,
       cluster = cluster,
       role = role))
 
-  def peers(p: Iterable[NodeState]): Iterable[NodeState] =
+  def peers(p: Iterable[Task]): Iterable[Task] =
     p.filter { peer => (peer.role == this.role) && peer != this }
 
   def goal = pState.goal
@@ -42,22 +42,22 @@ case class NodeState(
   def slaveId = pState.slaveId
 
   @deprecated("move to pState", "")
-  def inferPersistedState: CephNode = pState
+  def inferPersistedState: PersistentState = pState
 
   /** If task is running
     */
   def runningState: Option[RunState.EnumVal] = for {
     status <- taskStatus
     launched <- pState.lastLaunched
-    if (status.getState == TaskState.TASK_RUNNING)
+    if (status.getState == Protos.TaskState.TASK_RUNNING)
   } yield {
     launched
   }
 }
 
-object NodeState {
-  def newNode(id: UUID, cluster: String, role: NodeRole.EnumVal, persistentState: Option[CephNode])(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): NodeState = {
+object Task {
+  def newTask(id: UUID, cluster: String, role: TaskRole.EnumVal, persistentState: Option[PersistentState])(
+    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
 
     val taskId = makeTaskId(role = role, cluster = cluster, id = id)
     val taskStatus = for {
@@ -65,7 +65,7 @@ object NodeState {
       slaveId <- p.slaveId
     } yield ProtoHelpers.newTaskStatus(taskId, slaveId)
 
-    NodeState(
+    Task(
       id = id,
       cluster = cluster,
       role = role,
@@ -74,9 +74,9 @@ object NodeState {
       taskStatus = taskStatus)
   }
 
-  def forRole(role: NodeRole.EnumVal)(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): NodeState = {
-    newNode(
+  def forRole(role: TaskRole.EnumVal)(
+    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
+    newTask(
       id = UUID.randomUUID,
       cluster = Constants.DefaultCluster,
       role = role,
@@ -84,15 +84,15 @@ object NodeState {
   }
 
 
-  def fromState(state: CephNode)(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): NodeState = {
-    newNode(
+  def fromState(state: PersistentState)(
+    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
+    newTask(
       id = state.id,
       cluster = state.cluster,
       role = state.role,
       persistentState = Some(state))
   }
-  def makeTaskId(role: NodeRole.EnumVal, cluster: String, id: UUID): String =
+  def makeTaskId(role: TaskRole.EnumVal, cluster: String, id: UUID): String =
     s"${role}#${cluster}#${id.toString}"
 
 }

@@ -15,13 +15,13 @@ case class TaskStore(kvStore: KVStore) {
 
   import PlayJsonFormats._
 
-  val nodePathRegex = s"^${NodeRole.values.mkString("|")}:".r
-  private val parsingFunction: PartialFunction[String, (String, (JsValue => CephNode))] = {
-    case path if nodePathRegex.findFirstMatchIn(path).nonEmpty =>
-      (path, _.as[CephNode])
+  val taskPathRegex = s"^${TaskRole.values.mkString("|")}:".r
+  private val parsingFunction: PartialFunction[String, (String, (JsValue => PersistentState))] = {
+    case path if taskPathRegex.findFirstMatchIn(path).nonEmpty =>
+      (path, _.as[PersistentState])
   }
 
-  def getNodes: Future[Seq[CephNode]] = async {
+  def getTasks: Future[Seq[PersistentState]] = async {
     val paths = await(kvStore.children(tasksPath)).
       collect(parsingFunction).
       map { case (path, parser) =>
@@ -38,8 +38,8 @@ case class TaskStore(kvStore: KVStore) {
       flatten
   }
 
-  def save(node: CephNode): Future[Unit] = {
-    val data = Json.toJson(node).toString
-    kvStore.createAndSet(s"tasks/${node.role}:" + node.id.toString, data.getBytes(UTF_8))
+  def save(task: PersistentState): Future[Unit] = {
+    val data = Json.toJson(task).toString
+    kvStore.createAndSet(s"tasks/${task.role}:" + task.id.toString, data.getBytes(UTF_8))
   }
 }
