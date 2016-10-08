@@ -80,6 +80,7 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
 
 object Main extends App {
   val cmdLineOpts = new CephFrameworkOptions(args.toList)
+  cmdLineOpts.verify()
   val config = AppConfiguration.fromOpts(cmdLineOpts)
 
   val module = new Universe(config)

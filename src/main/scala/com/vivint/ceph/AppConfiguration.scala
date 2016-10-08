@@ -35,7 +35,7 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
 
   val clusterNetwork = opt[String]("cluster-network",
     descr = "CIDR of the ceph network, in 0.0.0.0/24 format; can be set by CEPH_NETWORK. Default = <public-network>.",
-    default = Option(System.getenv("CLUSTER_NETWORK")).orElse(publicNetwork.toOption))
+    default = Option(System.getenv("CLUSTER_NETWORK")))
 
   val offerTimeout = opt[Int]("offer-timeout", 't',
     descr = "Duration in seconds after which offers timeout; Default = 30.",
@@ -59,8 +59,6 @@ class CephFrameworkOptions(args: List[String]) extends ScallopConf(args) {
   val apiHost = opt[String]("api-host",
     descr = s"HTTP API host; can be set via API_HOST; default 127.0.0.1",
     default = Option(System.getenv("API_HOST"))).orElse(Some("127.0.0.1"))
-
-  verify()
 }
 
 case class AppConfiguration(
@@ -95,7 +93,7 @@ object AppConfiguration {
       zookeeper = o.zookeeper(),
       offerTimeout = o.offerTimeout().seconds,
       publicNetwork = o.publicNetwork(),
-      clusterNetwork = o.clusterNetwork(),
+      clusterNetwork = o.clusterNetwork.toOption.getOrElse(o.publicNetwork()),
       storageBackend = o.storageBackend(),
       failoverTimeout = o.failoverTimeout(),
       apiPort = o.apiPort(),
