@@ -1,7 +1,6 @@
 package com.vivint.ceph
 package kvstore
 
-import akka.actor.{ ActorContext, Props, Actor, ActorRef }
 import akka.stream.scaladsl.Source
 import scala.collection.immutable.Seq
 import scala.concurrent.{ Future, Promise }
@@ -35,6 +34,15 @@ case class CrashingKVStore(kvStore: KVStore) extends KVStore {
   def delete(path: String): Future[Unit] = wrap(() => kvStore.delete(path))
   def get(path: String): Future[Option[Array[Byte]]] = wrap(() => kvStore.get(path))
   def children(path: String): Future[Seq[String]] = wrap(() => kvStore.children(path))
+  def lock(path: String): Future[KVStore.CancellableWithResult] = {
+    val f1 = wrap(() => kvStore.lock(path))
+    f1.onSuccess { case cancellable =>
+      try { wrap(() => cancellable.result) }
+      catch { case ex: Throwable => println(ex) }
+    }(SameThreadExecutionContext)
+    f1
+  }
+
   def watch(path: String, bufferSize: Int = 1): Source[Option[Array[Byte]], KVStore.CancellableWithResult] =
     kvStore.watch(path).mapMaterializedValue { r =>
       wrap(() => r.result)

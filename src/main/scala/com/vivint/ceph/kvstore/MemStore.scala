@@ -1,12 +1,13 @@
 package com.vivint.ceph.kvstore
 
 
+import akka.Done
 import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.SourceQueueWithComplete
 import java.io.File
 import java.util.concurrent.Executors
 import scala.collection.immutable.Seq
-import scala.concurrent.{ ExecutionContext, Future }
+import scala.concurrent.{ ExecutionContext, Future, Promise }
 import akka.stream.scaladsl.Source
 
 /** For use in tests.
@@ -77,6 +78,21 @@ class MemStore extends KVStore {
     state.get(path)
   }
 
+  def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
+    val lockFile = fileFor(path)
+    if (state.contains(lockFile)) {
+      throw new RuntimeException("Coudln't acquire lock in memory lock")
+    }
+
+    state = state.updated(lockFile, Array.empty)
+
+    val p = Promise[Done]
+    new KVStore.CancellableWithResult {
+      def result = p.future
+      def cancel(): Boolean = { p.trySuccess(Done); true }
+      def isCancelled = p.isCompleted
+    }
+  }
 
   def children(path: String): Future[Seq[String]] = Future {
     val parent = fileFor(path)

@@ -1,6 +1,5 @@
 package com.vivint.ceph
 
-import com.typesafe.config.ConfigFactory
 import org.rogach.scallop._
 import scala.concurrent.duration._
 

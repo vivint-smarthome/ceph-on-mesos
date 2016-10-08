@@ -1,16 +1,21 @@
 package com.vivint.ceph.kvstore
 
+import akka.Done
 import java.util.concurrent.Executors
+import org.apache.curator.framework.CuratorFramework
+import org.apache.curator.framework.state.{ ConnectionState, ConnectionStateListener }
+import org.apache.zookeeper.KeeperException.ConnectionLossException
 
 import scala.collection.JavaConversions._
 import scala.collection.immutable.Seq
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.Try
 
 import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.{Source, SourceQueueWithComplete}
 import org.apache.curator.framework.CuratorFrameworkFactory
 import org.apache.curator.framework.recipes.cache.{NodeCache, NodeCacheListener}
+import org.apache.curator.framework.recipes.locks.InterProcessSemaphoreMutex
 import org.apache.curator.retry.ExponentialBackoffRetry
 import org.apache.zookeeper.KeeperException
 import com.vivint.ceph.AppConfiguration
@@ -67,6 +72,30 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
 
   def children(path: String): Future[Seq[String]] = Future {
     client.getChildren.forPath(path).toList
+  }
+
+  def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
+    val lock = new InterProcessSemaphoreMutex(client, path)
+    lock.acquire()
+    val p = Promise[Done]
+
+    val listener = new ConnectionStateListener {
+      def stateChanged(client: CuratorFramework, newState: ConnectionState): Unit = {
+        if (!newState.isConnected()) {
+          p.failure(new ConnectionLossException)
+        }
+      }
+    }
+    p.future.onComplete { _ =>
+      client.getConnectionStateListenable.removeListener(listener)
+      lock.release()
+    }
+
+    new KVStore.CancellableWithResult {
+      def result = p.future
+      def cancel(): Boolean = { p.trySuccess(Done) }
+      def isCancelled = p.future.isCompleted
+    }
   }
 
   private def wireSourceQueue(path: String, queue: SourceQueueWithComplete[Option[Array[Byte]]]): Future[Unit] = Future {

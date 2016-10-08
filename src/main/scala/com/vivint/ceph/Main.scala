@@ -4,7 +4,9 @@ import akka.actor.{ ActorRef, ActorSystem, Props }
 import akka.pattern.BackoffSupervisor
 import java.net.InetAddress
 import org.apache.mesos.Protos._
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
+import scala.concurrent.Await
 import com.vivint.ceph.kvstore.KVStore
 import scaldi.Module
 
@@ -49,7 +51,18 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   }
 
   bind [FrameworkIdStore] to (new FrameworkIdStore)
-  bind [ActorSystem] to system
+  bind [ActorSystem] to system destroyWith { _ =>
+    try {
+      System.err.println("Shutting down actorSystem")
+      Await.result(system.terminate(), 10.seconds)
+      System.err.println("Actor system shut down")
+    } catch {
+      case ex: Throwable =>
+        System.err.println(s"Unable to shutdown actor system within timeout: ${ex.getMessage}")
+        ex.printStackTrace(System.err)
+    }
+  }
+
   bind [views.ConfigTemplates] to new views.ConfigTemplates
   bind [OfferOperations] to new OfferOperations
   bind [Option[Credential]] to {
@@ -92,5 +105,17 @@ object Main extends App {
   val taskActor = inject[ActorRef](classOf[TaskActor])
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
   val httpService = inject[api.HttpService]
-  httpService.run()
+
+  def dieWith(ex: Throwable): Unit = {
+    System.err.println(s"Error starting API service: ${ex.getMessage}")
+    ex.printStackTrace(System.err)
+    try { module.destroy(_ => true) }
+    catch { case ex: Throwable => println("le problem") }
+    System.exit(1)
+  }
+
+  httpService.run().onFailure {
+    case  ex: Throwable =>
+      dieWith(ex)
+  }(ExecutionContext.global)
 }

@@ -1,11 +1,10 @@
 package com.vivint.ceph.kvstore
 
 import akka.Done
-import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.Keep
-import java.io.{ File, FileInputStream, FileOutputStream }
+import java.io.{ File, FileInputStream, FileOutputStream, RandomAccessFile }
 import java.util.Arrays
-import java.util.concurrent.{ ExecutorService, Executors }
+import java.util.concurrent.Executors
 import org.apache.commons.io.IOUtils
 import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future, Promise }
@@ -40,12 +39,16 @@ class FileStore(basePath: File) extends KVStore {
     f.close()
   }
 
-  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = Future {
-    val output = fileFor(path)
+  private [this] def createAndSetSync(output: File, data: Array[Byte]): Unit = {
     output.getParentFile.mkdirs()
     val f = new FileOutputStream(output)
     IOUtils.writeChunked(data, f)
     f.close()
+  }
+
+  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = Future {
+    val output = fileFor(path)
+    createAndSetSync(output, data)
   }
 
   def delete(path: String): Future[Unit] = Future {
@@ -63,6 +66,24 @@ class FileStore(basePath: File) extends KVStore {
       Some(data)
     } else {
       None
+    }
+  }
+
+  def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
+    val lockFile = fileFor(path)
+    createAndSetSync(lockFile, Array.empty)
+    val raf = new RandomAccessFile(lockFile, "rw")
+    val lock = raf.getChannel().tryLock()
+    if (lock == null)
+      throw new RuntimeException(s"Could not acquire lock for ${path}")
+
+    val p = Promise[Done]
+    p.future.onComplete(_ => lock.release())
+
+    new KVStore.CancellableWithResult {
+      def result = p.future
+      def cancel(): Boolean = { p.trySuccess(Done) }
+      def isCancelled = p.future.isCompleted
     }
   }
 

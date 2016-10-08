@@ -16,6 +16,8 @@ trait KVStore {
   def delete(path: String): Future[Unit]
   def get(path: String): Future[Option[Array[Byte]]]
 
+  def lock(path: String): Future[KVStore.CancellableWithResult]
+
   def getAll(paths: Seq[String]): Future[Seq[Option[Array[Byte]]]] = {
     import ExecutionContext.Implicits.global
     Future.sequence {

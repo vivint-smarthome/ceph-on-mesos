@@ -1,20 +1,16 @@
 package com.vivint.ceph
 
-import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FSM, Kill, PoisonPill, Props, Stash }
+import akka.actor.{ Actor, ActorLogging, ActorRef, Cancellable, Stash }
 import akka.pattern.pipe
 import akka.stream.{ ActorMaterializer, OverflowStrategy, ThrottleMode }
 import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
-import java.util.concurrent.TimeoutException
 import lib.FutureHelpers.tSequence
-import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo }
 import mesosphere.mesos.matcher._
-import mesosphere.mesos.protos
 import org.apache.mesos.Protos
 import org.slf4j.LoggerFactory
 import com.vivint.ceph.kvstore.{KVStore, CrashingKVStore}
 import com.vivint.ceph.model._
 import scala.collection.breakOut
-import scala.collection.JavaConverters._
 import scala.collection.immutable.{Iterable, Seq}
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -49,6 +45,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   implicit val materializer = ActorMaterializer()
   val frameworkIdStore = inject[FrameworkIdStore]
   import ProtoHelpers._
+
   var frameworkId : Protos.FrameworkID = _
   var _behaviorSet: TaskBehavior = _
   implicit def behaviorSet: TaskBehavior =
@@ -77,8 +74,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
 
-  lib.FutureMonitor.monitor(result, "configuration stream")
-  lib.FutureMonitor.monitor(kvStore.crashed, "kvStore")
+  lib.FutureMonitor.monitor(result, log, "configuration stream")
+  lib.FutureMonitor.monitor(kvStore.crashed, log, "kvStore")
 
   val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail).
     throttle(1, 5.seconds, 1, ThrottleMode.shaping).
@@ -99,17 +96,18 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         case Success(_) => log.debug("{} : success", desc)
         case Failure(ex) =>
           log.error(ex, "{}: failure", desc)
-          self ! PoisonPill
       }
       f
     }
 
-    val initialState = tSequence(
-      logging(taskStore.getTasks, "taskStore.getTasks"),
-      logging(frameworkIdStore.get, "frameworkIdStore.get"),
-      logging(ClusterSecretStore.createOrGenerateSecrets(kvStore), "secrets"),
-      logging(deployConfigF, "deploy config")
-    ).
+    logging(kvStore.lock(Constants.LockPath), "acquiring lock").
+      flatMap { _ =>
+        tSequence(
+          logging(taskStore.getTasks, "taskStore.getTasks"),
+          logging(frameworkIdStore.get, "frameworkIdStore.get"),
+          logging(ClusterSecretStore.createOrGenerateSecrets(kvStore), "secrets"),
+          logging(deployConfigF, "deploy config"))
+      }.
       map(InitialState.tupled).
       pipeTo(self)
   }

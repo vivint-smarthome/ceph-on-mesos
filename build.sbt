@@ -40,6 +40,8 @@ lazy val root = (project in file(".")).
   ).
   dependsOn(marathon)
 
+enablePlugins(JavaAppPackaging)
+
 lazy val marathon = (project in file("marathon-submodule/")).
   settings(
     commonSettings: _*).

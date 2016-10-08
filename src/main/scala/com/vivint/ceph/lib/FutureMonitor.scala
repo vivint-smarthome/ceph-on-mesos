@@ -1,26 +1,20 @@
 package com.vivint.ceph.lib
 
-import akka.actor.{ Actor, ActorContext, ActorLogging, Props }
+import akka.actor.{ ActorContext, Kill }
+import akka.event.LoggingAdapter
 import scala.concurrent.Future
-import scala.util.{Success,Failure}
-
 
 object FutureMonitor {
-  def monitor(f: Future[Any], description: String)(implicit context: ActorContext) = {
+  def monitor(f: Future[Any], log: LoggingAdapter, description: String)(implicit context: ActorContext): Unit = {
     var failed = false
-    context.actorOf(Props(new Actor with ActorLogging {
-      if (failed) // prevent infinite loops if all children actors get restarted
-        context.stop(self)
-      else
-        f.onComplete {
-          case Success(_) =>
-            context.stop(self)
-          case Failure(ex) =>
-            failed = true
-            log.error(ex, s"Unexpected error for ${description}")
-            self ! ex
+    if (failed) // prevent infinite loops if all children actors get restarted
+      context.stop(context.self)
+    else
+      f.onFailure {
+        case ex =>
+          failed = true
+          context.self ! Kill
+          log.error(ex, s"Unexpected error for ${description}")
       }(context.dispatcher)
-      def receive = { case ex: Throwable => throw(ex) }
-    }))
   }
 }
