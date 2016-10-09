@@ -22,22 +22,21 @@ object TaskActor {
   sealed trait Command
   case object GetTasks extends Command
   case class UpdateGoal(taskId: String, goal: RunState.EnumVal) extends Command
-
-  case class InitialState(
-    tasks: Seq[PersistentState],
-    frameworkId: Protos.FrameworkID,
-    secrets: ClusterSecrets,
-    config: CephConfig)
-  case class ConfigUpdate(deploymentConfig: Option[CephConfig])
-  case class TaskTimer(actions: String, payload: Any)
-  case class PersistSuccess(taskId: String, version: Long)
-  case class TaskUpdated(previousVersion: PersistentState, nextVersion: PersistentState)
+  case class TaskTimer(taskId: String, timerName: String)
 
   val log = LoggerFactory.getLogger(getClass)
 }
 
 class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
   import TaskActor._
+  case class ConfigUpdate(deploymentConfig: Option[CephConfig])
+  case class PersistSuccess(taskId: String, version: Long)
+  case class InitialState(
+    tasks: Seq[PersistentState],
+    frameworkId: Protos.FrameworkID,
+    secrets: ClusterSecrets,
+    config: CephConfig)
+
   val kvStore = CrashingKVStore(inject[KVStore])
   val taskStore = TaskStore(kvStore)
   val offerOperations = inject[OfferOperations]
@@ -47,14 +46,13 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   import ProtoHelpers._
 
   var frameworkId : Protos.FrameworkID = _
-  var _behaviorSet: TaskBehavior = _
-  implicit def behaviorSet: TaskBehavior =
-    if (_behaviorSet == null)
-      throw new IllegalStateException("tried to initialize a behaviorSet before behaviorSet was initializied")
+  var _taskFSM: TaskFSM = _
+  implicit def taskFSM: TaskFSM =
+    if (_taskFSM == null)
+      throw new IllegalStateException("tried to initialize a behavior before taskFSM was initializied")
     else
-      _behaviorSet
+      _taskFSM
 
-  // var tasks: Map[String, Task] = Map.empty
   val tasks = new TasksState(log)
 
   var cephConfig: CephConfig = _
@@ -76,9 +74,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     toMat(Sink.foreach(self ! _))(Keep.both).
     run
 
-  lib.FutureMonitor.monitor(result, log, "configuration stream")
-  lib.FutureMonitor.monitor(kvStore.crashed, log, "kvStore")
-
   val throttledRevives = Source.queue[Unit](1, OverflowStrategy.dropTail).
     throttle(1, 5.seconds, 1, ThrottleMode.shaping).
     to(Sink.foreach({ _ =>
@@ -89,17 +84,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   override def preStart(): Unit = {
     import context.dispatcher
 
+    lib.FutureMonitor.monitor(result, log, "configuration stream")
+    lib.FutureMonitor.monitor(kvStore.crashed, log, "kvStore")
+
     configStore.storeConfigIfNotExist()
     tasks.addSubscriber {
       case (before, Some(after)) if before.map(_.version).getOrElse(0) != after.version =>
         // version changed?
         import context.dispatcher
         taskStore.save(after.pState).map(_ => PersistSuccess(after.taskId, after.version)) pipeTo self
-    }
-    tasks.addSubscriber {
-      case (Some(before), Some(after)) =>
-        tasks.updateTask(
-          processEvents(after, List(TaskFSM.TaskUpdated(before))))
     }
 
     log.info("pulling initial state for TaskActor")
@@ -130,85 +123,29 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     throttledRevives.complete()
   }
 
-  final def processEvents(task: Task, events: List[TaskFSM.Event]): Task = events match {
-    case event :: rest =>
-      log.debug("{} - sending event {}", task.taskId, event.getClass.getName)
-
-      processEvents(
-        processDirective(
-          task,
-          task.behavior.submit(event, task, tasks.all)),
-        rest)
-    case Nil =>
-      task
-  }
-
-  final def processHeldEvents(task: Task): Task = {
-    task.heldOffer match {
-      case Some((offer, resourceMatch)) =>
-        processEvents(
-          task.copy(heldOffer = None),
-          TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
-      case None =>
-        task
-    }
-  }
-
-  final def processAction(task: Task, action: TaskFSM.Action): Task = {
-    log.debug("{} - processing directive response action {}", task.taskId, action.getClass.getName)
-    action match {
-      case TaskFSM.Hold(offer, resourceMatch) =>
-        // Decline existing held offer
-        task.heldOffer.foreach {
-          case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
-        }
-        task.copy(heldOffer = Some((offer, resourceMatch)))
-      case TaskFSM.Persist(data) =>
-        task.copy(persistentState = Some(data))
-      case TaskFSM.WantOffers =>
-        throttledRevives.offer(())
-        task.copy(
-          wantingNewOffer = true,
-          offerMatcher = offerMatchers.get(task.role))
-      case TaskFSM.KillTask =>
-        frameworkActor ! FrameworkActor.KillTask(newTaskId(task.taskId))
-        task
-      case TaskFSM.OfferResponse(pendingOffer, operations) =>
-        pendingOffer.resultingOperationsPromise.success(operations.toList)
-        task
-    }
-  }
-
-  final def processDirective(task: Task, directive: TaskFSM.Directive): Task = {
-    val taskAfterAction = directive.action.foldLeft(task)(processAction)
-
-    directive.transition match {
-      case Some(nextBehaviorFactory) =>
-        task.behavior.teardown()
-        val nextBehavior = nextBehaviorFactory(task.taskId, context)
-        log.info("task {}: Transition {} -> {}", task.taskId, task.behavior.name, nextBehavior.name)
-        processHeldEvents(
-          initializeBehavior(taskAfterAction.copy(behavior = nextBehavior)))
-
-      case None =>
-        taskAfterAction
-    }
-  }
-
-  final def initializeBehavior(task: Task): Task = {
-    log.info("task {}: Initializing behavior {}", task.taskId, task.behavior.name)
-    processDirective(task,
-      task.behavior.initialize(task, tasks.all))
-  }
-
   def receive = {
     case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
-      _behaviorSet = new TaskBehavior(secrets, { () => frameworkId }, { () => cephConfig })
+      val behaviorSet = new TaskBehavior(secrets, { () => frameworkId }, { () => cephConfig })
+      _taskFSM = new TaskFSM(tasks,
+        log = log,
+        behaviorSet = behaviorSet,
+        setTimer = { (taskId, timerName, duration) =>
+          import context.dispatcher
+          context.system.scheduler.scheduleOnce(duration) {
+            self ! TaskTimer(taskId, timerName)
+          }},
+        revive = { () => throttledRevives.offer(()) },
+        killTask = { (taskId) =>
+          frameworkActor ! FrameworkActor.KillTask(newTaskId(taskId))
+        }
+      )
+
       log.info("InitialState: persistentTaskStates count = {}, fId = {}", persistentTaskStates.length, fId)
         cephConfig = _cephConfig
         frameworkId = fId
       val newTasks = persistentTaskStates.map { p =>
-        initializeBehavior(Task.fromState(p))
+        taskFSM.initializeBehavior(
+          Task.fromState(p, defaultBehavior = taskFSM.defaultBehavior))
       }
       newTasks.foreach(tasks.updateTask)
 
@@ -282,30 +219,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
-  // /** Given an updated task status, persists if persistance has changed (further mondifying the nextVersion).
-  //   * Returns the modified version.
-  //   *
-  //   * TODO - Extract and lock down valid operations. Nobody should be able to update the task state without going
-  //   * through this method.
-  //   */
-  // def updateTask(update: Task): Task = {
-  //   val nextTask =
-  //     if (tasks.get(update.taskId).flatMap(_.persistentState) != update.persistentState) {
-  //       import context.dispatcher
-  //       val nextVersion = update.version + 1
-  //       taskStore.save(update.pState).map(_ => PersistSuccess(update.taskId, nextVersion)) pipeTo self
-  //       update.copy(
-  //         version = nextVersion)
-  //     } else {
-  //       update
-  //     }
-
-  //   if (log.isDebugEnabled)
-  //   log.debug("task updated: {}", model.PlayJsonFormats.TaskWriter.writes(nextTask))
-  //   tasks = tasks.updated(update.taskId, nextTask)
-  //   nextTask
-  // }
-
   /** Looking at reservation labels, routes the offer to the appropriate
     *
     */
@@ -331,8 +244,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         val task = tasks(taskId)
         val pendingOffer = PendingOffer(offer.withResources(resources))
 
-        tasks.updateTask(
-          processEvents(task, List(TaskFSM.MatchedOffer(pendingOffer, None))))
+        // TODO - move updateTask to taskFSM
+        taskFSM.handleEvent(task, TaskFSM.MatchedOffer(pendingOffer, None))
 
         pendingOffer.resultingOperations
 
@@ -345,7 +258,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           filter(_.readyForOffer).
           flatMap { task =>
             val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
-            task.offerMatcher.
+            offerMatchers.get(task.role).
               flatMap { _(matchCandidateOffer, task, tasks.values) }.
               map { (_, task) }
           }.
@@ -355,10 +268,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           case Some((matchResult, task)) =>
             // TODO - we need to do something with this result
             val pendingOffer = PendingOffer(matchCandidateOffer)
-            tasks.updateTask {
-              processEvents(
-                task.copy(wantingNewOffer = false, offerMatcher = None),
-                TaskFSM.MatchedOffer(pendingOffer, Some(matchResult)) :: Nil)}
+            taskFSM.handleEvent(
+              task.copy(wantingNewOffer = false),
+              TaskFSM.MatchedOffer(pendingOffer, Some(matchResult)))
+
             pendingOffer.resultingOperations
           case _ =>
             Future.successful(Nil)
@@ -419,11 +332,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       applyConfiguration()
     case ConfigUpdate(None) =>
       log.warning("Ceph config went missing / unparseable. Changes not applied")
-    case TaskTimer(taskId, payload) =>
-      tasks.get(taskId) foreach { task =>
-        tasks.updateTask(
-          processEvents(task, List(TaskFSM.Timer(payload))))
-      }
+    case TaskTimer(taskId, timerName) =>
+      taskFSM.onTimer(taskId, timerName)
     case PersistSuccess(taskId, version) =>
       tasks.updatePersistence(taskId, version)
   }
@@ -432,17 +342,17 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     val monTasks = tasks.values.filter ( _.role == TaskRole.Monitor)
     val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
     val newMonitors = Stream.
-      continually { Task.forRole(TaskRole.Monitor) }.
+      continually { Task.forRole(TaskRole.Monitor, taskFSM.defaultBehavior) }.
       take(newMonitorCount).
-      map(initializeBehavior).
+      map(taskFSM.initializeBehavior).
       toList
 
     val cephTasks = tasks.values.filter (_.role == TaskRole.OSD)
     val newOSDCount = Math.max(0, cephConfig.deployment.osd.count - cephTasks.size)
     val newOSDs = Stream.
-      continually { Task.forRole(TaskRole.OSD) }.
+      continually { Task.forRole(TaskRole.OSD, taskFSM.defaultBehavior) }.
       take(newOSDCount).
-      map(initializeBehavior).
+      map(taskFSM.initializeBehavior).
       toList
 
     log.info("added {} new monitors, {} new OSDs as a result of config update", newMonitors.length, newOSDs.length)
@@ -450,15 +360,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     (newMonitors ++ newOSDs).map(tasks.updateTask)
     offerMatchers = offerMatchFactory(cephConfig)
 
-    var matchersUpdated = false
-    tasks.values.foreach { task =>
-      if (task.wantingNewOffer) {
-        matchersUpdated = true
-        tasks.updateTask(
-          task.copy(offerMatcher = offerMatchers.get(task.role)))
-      }
-    }
-    if (matchersUpdated) {
+    if (tasks.values.exists(_.wantingNewOffer)) {
       log.info("matchers were updated. Scheduling revive")
       throttledRevives.offer(())
     }

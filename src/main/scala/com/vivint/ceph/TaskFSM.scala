@@ -1,6 +1,8 @@
 package com.vivint.ceph
 
 import akka.actor.{ ActorContext, Cancellable }
+import akka.event.LoggingAdapter
+import com.vivint.ceph.model.TaskRole
 import java.util.concurrent.atomic.AtomicInteger
 import mesosphere.mesos.matcher.ResourceMatcher
 import mesosphere.mesos.protos.TaskStatus
@@ -25,21 +27,21 @@ object TaskFSM {
   case class Timer(id: Any) extends Event
 
   sealed trait Action {
-    def withTransition(b: BehaviorFactory): Directive =
+    def withTransition(b: Behavior): Directive =
       Directive(List(this), Some(b))
     def andAlso(other: Action): ActionList =
       ActionList(this :: other :: Nil)
   }
 
   case class ActionList(actions: List[Action]) {
-    def withTransition(b: BehaviorFactory): Directive =
+    def withTransition(b: Behavior): Directive =
       Directive(actions, Some(b))
 
     def andAlso(other: Action): ActionList =
       ActionList(actions :+ other)
   }
 
-  case class Directive(action: List[Action] = Nil, transition: Option[BehaviorFactory] = None)
+  case class Directive(action: List[Action] = Nil, transition: Option[Behavior] = None)
 
   object Directive {
     import scala.language.implicitConversions
@@ -56,6 +58,129 @@ object TaskFSM {
   case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
   case object WantOffers extends Action
   case class OfferResponse(offer: PendingOffer, operations: Iterable[Offer.Operation]) extends Action
+  case class SetBehaviorTimer(id: String, duration: FiniteDuration) extends Action
+}
+
+class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
+  setTimer: (String, String, FiniteDuration) => Cancellable,
+  revive: () => Unit,
+  killTask: (String => Unit)
+) {
+  // TODO - for each task
+  type TaskId = String
+  type TimerName = String
+  import scala.collection.mutable
+  private val taskTimers = mutable.Map.empty[TaskId, mutable.Map[TimerName, Cancellable]].
+    withDefaultValue(mutable.Map.empty)
+
+  tasks.addSubscriber {
+    case (Some(before), Some(after)) =>
+      handleEvent(after, TaskFSM.TaskUpdated(before))
+  }
+
+  private def setBehaviorTimer(task: Task, timerName: TimerName, duration: FiniteDuration): Unit = {
+    val timers = taskTimers(task.taskId)
+    timers(timerName) = setTimer(task.taskId, timerName, duration)
+  }
+
+  private def clearTimers(task: Task): Unit =
+    taskTimers.
+      remove(task.taskId).
+      getOrElse(mutable.Map.empty).
+      foreach { case (_, cancellable) =>
+        cancellable.cancel()
+      }
+
+  def onTimer(taskId: TaskId, timerName: TimerName): Unit = {
+    for {
+      cancellable <- taskTimers(taskId).remove(timerName)
+      task <- tasks.get(taskId)
+    } {
+      cancellable.cancel() // just in case it was manually invoked?
+      log.debug("Timer {} for taskId {} fired", timerName, taskId)
+      handleEvent(task, TaskFSM.Timer(timerName))
+    }
+  }
+
+  private def processEvents(task: Task, events: List[TaskFSM.Event]): Task = events match {
+    case event :: rest =>
+      log.debug("{} - sending event {}", task.taskId, event.getClass.getName)
+
+      processEvents(
+        processDirective(
+          task,
+          task.behavior.submit(event, task, tasks.all)),
+        rest)
+    case Nil =>
+      task
+  }
+
+  private def processHeldEvents(task: Task): Task = {
+    task.heldOffer match {
+      case Some((offer, resourceMatch)) =>
+        processEvents(
+          task.copy(heldOffer = None),
+          TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
+      case None =>
+        task
+    }
+  }
+
+  private def processAction(task: Task, action: TaskFSM.Action): Task = {
+    log.debug("{} - processing directive response action {}", task.taskId, action.getClass.getName)
+    action match {
+      case TaskFSM.Hold(offer, resourceMatch) =>
+        // Decline existing held offer
+        task.heldOffer.foreach {
+          case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
+        }
+        task.copy(heldOffer = Some((offer, resourceMatch)))
+      case TaskFSM.Persist(data) =>
+        task.copy(persistentState = Some(data))
+      case TaskFSM.SetBehaviorTimer(name, duration: FiniteDuration) =>
+        setBehaviorTimer(task, name, duration)
+        task
+      case TaskFSM.WantOffers =>
+        revive()
+        task.copy(wantingNewOffer = true)
+      case TaskFSM.KillTask =>
+        killTask(task.taskId)
+        task
+      case TaskFSM.OfferResponse(pendingOffer, operations) =>
+        pendingOffer.resultingOperationsPromise.success(operations.toList)
+        task
+    }
+  }
+
+  final def handleEvent(task: Task, event: TaskFSM.Event): Unit = {
+    tasks.updateTask(
+      processEvents(task, List(event)))
+  }
+
+  private final def processDirective(task: Task, directive: TaskFSM.Directive): Task = {
+    val taskAfterAction = directive.action.foldLeft(task)(processAction)
+
+    directive.transition match {
+      case Some(nextBehavior) =>
+        clearTimers(task)
+        log.info("task {}: Transition {} -> {}", task.taskId, task.behavior.name, nextBehavior.name)
+        processHeldEvents(
+          initializeBehavior(taskAfterAction.copy(behavior = nextBehavior)))
+
+      case None =>
+        taskAfterAction
+    }
+  }
+
+  final def initializeBehavior(task: Task): Task = {
+    log.info("task {}: Initializing behavior {}", task.taskId, task.behavior.name)
+    processDirective(task,
+      task.behavior.preStart(task, tasks.all))
+  }
+
+  def defaultBehavior(role: TaskRole.EnumVal): Behavior =
+    behaviorSet.defaultBehavior(role)
+
 }
 
 trait Directives {
@@ -72,71 +197,41 @@ trait Directives {
   /**
     * Change the behavor out after performing any actions
     */
-  final def transition(behaviorFactory: BehaviorFactory) = Directive(Nil, Some(behaviorFactory))
+  final def transition(behavior: Behavior) = Directive(Nil, Some(behavior))
 
   final val hold = Hold(_, _)
   final val multi = ActionList(_)
   final val wantOffers = WantOffers
   final val offerResponse = OfferResponse(_, _)
   final val killTask = KillTask
+  final val setBehaviorTimer = SetBehaviorTimer
 }
 
 object Directives extends Directives
 
 trait Behavior extends Directives {
-  private var initialized = false
   def name = getClass.getSimpleName
-  val actorContext: ActorContext
-  private val timers = scala.collection.mutable.Map.empty[Int, Cancellable]
-  case class BehaviorTimer(timerId: Int, id: Any)
 
-  def setBehaviorTimer(id: Any, duration: FiniteDuration): Unit = {
-    import actorContext.dispatcher
-    val timerId = Behavior.timerId.incrementAndGet()
-    timers(timerId) = actorContext.system.scheduler.scheduleOnce(duration) {
-      actorContext.self ! TaskActor.TaskTimer(taskId, BehaviorTimer(timerId, id))
-    }
-  }
-
-  @tailrec final def preHandleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
-    event match {
-      case Timer(BehaviorTimer(timerId, id)) =>
-        if (timers.remove(timerId).isEmpty)
-          stay
-        else {
-          timers.remove(timerId)
-          // unwrap managed timer payload
-          preHandleEvent(Timer(id), state, fullState)
-        }
-      case _ =>
-        handleEvent(event, state, fullState)
-    }
-  }
-
+  @deprecated("use preStart", "now")
   final def initialize(state: Task, fullState: Map[String, Task]): Directive =
     preStart(state, fullState)
-  final def submit(event: Event, state: Task, fullState: Map[String, Task]): Directive =
-    preHandleEvent(event, state, fullState)
-  final def teardown(): Unit = {
-    timers.values.foreach { _.cancel }
-    timers.clear()
-  }
 
-  def taskId: String
+  @deprecated("use handleEvent", "now")
+  final def submit(event: Event, state: Task, fullState: Map[String, Task]): Directive =
+    handleEvent(event, state, fullState)
+
   /**
     * Method provides an opportunity to set the next step
     */
-  protected def preStart(state: Task, fullState: Map[String, Task]): Directive = stay
-  protected def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
+  def preStart(state: Task, fullState: Map[String, Task]): Directive = stay
+  def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
 }
 
 object Behavior {
-  val timerId = new AtomicInteger
-  type BehaviorFactory = (String, ActorContext) => Behavior
   type DecideFunction = (Task, Map[String, Task]) => Directive
-  type TransitionFunction = (Task, Map[String, Task]) => BehaviorFactory
+  type TransitionFunction = (Task, Map[String, Task]) => Behavior
 }
 
 trait BehaviorSet {
-  def defaultBehaviorFactory: BehaviorFactory
+  def defaultBehavior(role: model.TaskRole.EnumVal): Behavior
 }

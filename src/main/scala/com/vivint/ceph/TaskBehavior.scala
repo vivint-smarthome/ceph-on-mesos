@@ -51,7 +51,7 @@ class TaskBehavior(
     }
   }
 
-  case class InitializeLogic(taskId: String, actorContext: ActorContext) extends Behavior {
+  case object InitializeLogic extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       decideWhatsNext(state: Task, fullState: Map[String, Task]): Directive
     }
@@ -60,10 +60,9 @@ class TaskBehavior(
       throw new IllegalStateException("handleEvent called on InitializeLogic")
   }
 
-  case class WaitForSync(nextBehavior: DecideFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
+  case class WaitForSync(nextBehavior: DecideFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("timeout", 30.seconds)
-      stay
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -83,7 +82,7 @@ class TaskBehavior(
     }
   }
 
-  case class Matching(taskId: String, actorContext: ActorContext) extends Behavior {
+  case object Matching extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       wantOffers
     }
@@ -107,7 +106,7 @@ class TaskBehavior(
               case Some(result) =>
                 offerResponse(
                   pendingOffer,
-                  offerOperations.reserveAndCreateVolumes(frameworkId(), taskId, result)).
+                  offerOperations.reserveAndCreateVolumes(frameworkId(), state.taskId, result)).
                   andAlso(
                     persist(
                       state.inferPersistedState.copy(slaveId = Some(pendingOffer.slaveId)))).
@@ -120,10 +119,9 @@ class TaskBehavior(
     }
   }
 
-  case class WaitForReservation(taskId: String, actorContext: ActorContext) extends Behavior {
+  case object WaitForReservation extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("timeout", 30.seconds)
-      stay
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -148,10 +146,9 @@ class TaskBehavior(
     }
   }
 
-  case class Sleep(duration: FiniteDuration, andThen: DecideFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
+  case class Sleep(duration: FiniteDuration, andThen: DecideFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       setBehaviorTimer("wakeup", duration)
-      stay
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -166,13 +163,12 @@ class TaskBehavior(
     }
   }
 
-  case class KillTask(duration: FiniteDuration, andThen: TransitionFunction)(val taskId: String, val actorContext: ActorContext) extends Behavior {
+  case class KillTask(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       if (state.runningState.isEmpty)
         throw new IllegalStateException("can't kill a non-running task")
 
-      setBehaviorTimer("timeout", duration)
-      killTask
+      setBehaviorTimer("timeout", duration).andAlso(killTask)
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -192,7 +188,7 @@ class TaskBehavior(
     }
   }
 
-  case class Running(taskId: String, actorContext: ActorContext) extends Behavior {
+  case object Running extends Behavior {
     def reservationConfirmed(state:Task) =
       state.pState.reservationConfirmed
 
@@ -495,6 +491,5 @@ class TaskBehavior(
     taskInfo
   }
 
-
-  def defaultBehaviorFactory = InitializeLogic
+  def defaultBehavior(role: TaskRole.EnumVal) = InitializeLogic
 }

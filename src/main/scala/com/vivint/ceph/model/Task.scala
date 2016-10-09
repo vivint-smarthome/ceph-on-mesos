@@ -53,13 +53,12 @@ case class Task(
   persistentVersion: Long = 0,
   wantingNewOffer: Boolean = false,
   heldOffer: Option[(PendingOffer, Option[ResourceMatcher.ResourceMatch])] = None,
-  offerMatcher: Option[OfferMatchFactory.OfferMatcher] = None,
   taskStatus: Option[TaskStatus] = None
 ) {
   if (wantingNewOffer)
     require(heldOffer.isEmpty, "cannot want offer and be holding an offer")
   def readyForOffer =
-    wantingNewOffer && heldOffer.isEmpty && offerMatcher.nonEmpty
+    wantingNewOffer && heldOffer.isEmpty
   lazy val taskId = Task.makeTaskId(role, cluster, id)
   taskStatus.foreach { s =>
     require(s.taskId == taskId, "Critical error - TaskStatus must match generated task state")
@@ -93,8 +92,8 @@ case class Task(
 }
 
 object Task {
-  def newTask(id: UUID, cluster: String, role: TaskRole.EnumVal, persistentState: Option[PersistentState])(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
+  def newTask(id: UUID, cluster: String, role: TaskRole.EnumVal, persistentState: Option[PersistentState],
+    defaultBehavior: TaskRole.EnumVal => Behavior): Task = {
 
     val taskId = makeTaskId(role = role, cluster = cluster, id = id)
     val taskStatus = for {
@@ -107,27 +106,28 @@ object Task {
       cluster = cluster,
       role = role,
       persistentState = persistentState,
-      behavior = behaviorSet.defaultBehaviorFactory(taskId, actorContext),
+      behavior = defaultBehavior(role),
       taskStatus = taskStatus)
   }
 
-  def forRole(role: TaskRole.EnumVal)(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
+  def forRole(role: TaskRole.EnumVal, defaultBehavior: TaskRole.EnumVal => Behavior): Task = {
     newTask(
       id = UUID.randomUUID,
       cluster = Constants.DefaultCluster,
       role = role,
-      persistentState = None)
+      persistentState = None,
+      defaultBehavior = defaultBehavior)
   }
 
 
-  def fromState(state: PersistentState)(
-    implicit actorContext: ActorContext, behaviorSet: BehaviorSet): Task = {
+  def fromState(state: PersistentState, defaultBehavior: TaskRole.EnumVal => Behavior): Task = {
     newTask(
       id = state.id,
       cluster = state.cluster,
       role = state.role,
-      persistentState = Some(state))
+      persistentState = Some(state),
+      defaultBehavior = defaultBehavior
+    )
   }
   def makeTaskId(role: TaskRole.EnumVal, cluster: String, id: UUID): String =
     s"${cluster}.${role}.${id.toString}"

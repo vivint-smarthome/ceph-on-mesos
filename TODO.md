@@ -28,6 +28,7 @@
 
 - [x] Extract task state tracking from TaskActor. Guard operations.
 - [x] Emit TaskChanged messages as part of nodeupdated; concern too scattered.
+- [x] extract TaskFSM concerns from TaskActor.
 - [ ] Extract launch strategy from node behavior.
 - [ ] Extract common behaviors into it's own library.
 - [ ] Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
