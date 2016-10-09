@@ -1,5 +1,6 @@
 package com.vivint.ceph
 
+import akka.stream.scaladsl.{ Sink, Source }
 import org.slf4j.LoggerFactory
 import akka.stream.scaladsl.Flow
 import model.CephConfigHelper
@@ -41,4 +42,17 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
   def stream =
     kvStore.watch(configPath).
       via(configParsingFlow)
+
+  def get = {
+    kvStore.get(configPath).
+      map {
+        case Some(bytes) =>
+          CephConfigHelper.parse(new String(bytes, UTF_8))
+        case None =>
+          throw new RuntimeException("No configuration detected")
+      }(ExecutionContext.global)
+  }
+
+
+    // .map(CephConfigHelper.parse)
 }

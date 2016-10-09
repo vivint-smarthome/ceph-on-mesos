@@ -122,20 +122,29 @@ ${renderSettings(cephSettings.mds)}
 """
   }
 
-  def tgz(secrets: ClusterSecrets, monitors: Set[ServiceLocation], cephSettings: CephSettings,
-    osdPort: Option[NumericRange.Inclusive[Long]] = None): Array[Byte] = {
-    import lib.TgzHelper.{octal, makeTgz, FileEntry}
+  def files(secrets: ClusterSecrets, monitors: Set[ServiceLocation], cephSettings: CephSettings,
+    osdPort: Option[NumericRange.Inclusive[Long]] = None): Map[String, String] = {
 
-    val entries = Seq(
+    Map(
       "etc/ceph/ceph.conf" -> cephConf(secrets, monitors, cephSettings, osdPort),
       "etc/ceph/ceph.client.admin.keyring" -> cephClientAdminRing(secrets),
       "etc/ceph/ceph.mon.keyring" -> cephMonRing(secrets),
       "var/lib/ceph/bootstrap-mds/ceph.keyring" -> bootstrapMdsRing(secrets),
       "var/lib/ceph/bootstrap-osd/ceph.keyring" -> bootstrapOsdRing(secrets),
       "var/lib/ceph/bootstrap-rgw/ceph.keyring" -> bootstrapRgwRing(secrets))
+  }
 
-    makeTgz(entries.map { case (path, contents) =>
-        path -> FileEntry(octal("644"), contents.getBytes(UTF_8))
-    } : _*)
+  def tgz(secrets: ClusterSecrets, monitors: Set[ServiceLocation], cephSettings: CephSettings,
+    osdPort: Option[NumericRange.Inclusive[Long]] = None): Array[Byte] = {
+    import lib.TgzHelper.makeTgz
+
+    makeTgz(files(secrets, monitors, cephSettings, osdPort))
+    // makeTgz(
+    //   "etc/ceph/ceph.conf" -> cephConf(secrets, monitors, cephSettings, osdPort),
+    //   "etc/ceph/ceph.client.admin.keyring" -> cephClientAdminRing(secrets),
+    //   "etc/ceph/ceph.mon.keyring" -> cephMonRing(secrets),
+    //   "var/lib/ceph/bootstrap-mds/ceph.keyring" -> bootstrapMdsRing(secrets),
+    //   "var/lib/ceph/bootstrap-osd/ceph.keyring" -> bootstrapOsdRing(secrets),
+    //   "var/lib/ceph/bootstrap-rgw/ceph.keyring" -> bootstrapRgwRing(secrets))
   }
 }

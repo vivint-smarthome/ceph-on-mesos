@@ -6,14 +6,26 @@ import org.apache.commons.io.IOUtils
 import org.kamranzafar.jtar.{ TarEntry, TarHeader, TarInputStream, TarOutputStream }
 import java.util.zip.GZIPOutputStream
 import scala.collection.{Iterator,breakOut}
+import java.nio.charset.StandardCharsets.UTF_8
 
 object TgzHelper {
   def octal(digits: String): Int =
     BigInt(digits, 8).toInt
 
   case class FileEntry(mode: Int, data: Array[Byte])
+  object FileEntry extends ((Int, Array[Byte]) => FileEntry) {
+    import scala.language.implicitConversions
+    implicit def apply(contents: String): FileEntry =
+      FileEntry(octal("644"), contents.getBytes(UTF_8))
+  }
 
-  def makeTgz(files: (String, FileEntry)*) = {
+  def makeTgz(files: Map[String, String]): Array[Byte] = {
+    makeTgz(files.toSeq.map { case (k, v) =>
+      k -> FileEntry(v)
+    } : _*)
+  }
+
+  def makeTgz(files: (String, FileEntry)*): Array[Byte] = {
     val dest = new ByteArrayOutputStream
     val tgz = new TarOutputStream(new GZIPOutputStream(dest))
     val now = System.currentTimeMillis / 1000
