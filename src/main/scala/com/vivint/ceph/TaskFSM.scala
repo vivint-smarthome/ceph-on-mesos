@@ -1,16 +1,12 @@
 package com.vivint.ceph
 
-import akka.actor.{ ActorContext, Cancellable }
+import akka.actor.Cancellable
 import akka.event.LoggingAdapter
-import com.vivint.ceph.model.TaskRole
-import java.util.concurrent.atomic.AtomicInteger
+import com.vivint.ceph.model.{ RunState, ServiceLocation, TaskRole }
+import org.apache.mesos.Protos
 import mesosphere.mesos.matcher.ResourceMatcher
-import mesosphere.mesos.protos.TaskStatus
-import org.apache.mesos.Protos.{FrameworkID, Offer}
 import com.vivint.ceph.model.{PersistentState,Task}
 import TaskFSM._
-import Behavior._
-import scala.annotation.tailrec
 import scala.concurrent.duration._
 import scala.collection.immutable.Iterable
 
@@ -26,39 +22,6 @@ object TaskFSM {
   case class MatchedOffer(offer: PendingOffer, matchResult: Option[ResourceMatcher.ResourceMatch]) extends Event
   case class Timer(id: Any) extends Event
 
-  sealed trait Action {
-    def withTransition(b: Behavior): Directive =
-      Directive(List(this), Some(b))
-    def andAlso(other: Action): ActionList =
-      ActionList(this :: other :: Nil)
-  }
-
-  case class ActionList(actions: List[Action]) {
-    def withTransition(b: Behavior): Directive =
-      Directive(actions, Some(b))
-
-    def andAlso(other: Action): ActionList =
-      ActionList(actions :+ other)
-  }
-
-  case class Directive(action: List[Action] = Nil, transition: Option[Behavior] = None)
-
-  object Directive {
-    import scala.language.implicitConversions
-    implicit def fromAction(action: Action): Directive = {
-      Directive(List(action), None)
-    }
-    implicit def fromActionList(actionList: ActionList): Directive = {
-      Directive(actionList.actions, None)
-    }
-  }
-
-  case class Persist(data: PersistentState) extends Action
-  case object KillTask extends Action
-  case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
-  case object WantOffers extends Action
-  case class OfferResponse(offer: PendingOffer, operations: Iterable[Offer.Operation]) extends Action
-  case class SetBehaviorTimer(id: String, duration: FiniteDuration) extends Action
 }
 
 class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
@@ -126,27 +89,27 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
     }
   }
 
-  private def processAction(task: Task, action: TaskFSM.Action): Task = {
+  private def processAction(task: Task, action: Directives.Action): Task = {
     log.debug("{} - processing directive response action {}", task.taskId, action.getClass.getName)
     action match {
-      case TaskFSM.Hold(offer, resourceMatch) =>
+      case Directives.Hold(offer, resourceMatch) =>
         // Decline existing held offer
         task.heldOffer.foreach {
           case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
         }
         task.copy(heldOffer = Some((offer, resourceMatch)))
-      case TaskFSM.Persist(data) =>
+      case Directives.Persist(data) =>
         task.copy(persistentState = Some(data))
-      case TaskFSM.SetBehaviorTimer(name, duration: FiniteDuration) =>
+      case Directives.SetBehaviorTimer(name, duration: FiniteDuration) =>
         setBehaviorTimer(task, name, duration)
         task
-      case TaskFSM.WantOffers =>
+      case Directives.WantOffers =>
         revive()
         task.copy(wantingNewOffer = true)
-      case TaskFSM.KillTask =>
+      case Directives.KillTask =>
         killTask(task.taskId)
         task
-      case TaskFSM.OfferResponse(pendingOffer, operations) =>
+      case Directives.OfferResponse(pendingOffer, operations) =>
         pendingOffer.resultingOperationsPromise.success(operations.toList)
         task
     }
@@ -157,7 +120,7 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
       processEvents(task, List(event)))
   }
 
-  private final def processDirective(task: Task, directive: TaskFSM.Directive): Task = {
+  private final def processDirective(task: Task, directive: Directives.Directive): Task = {
     val taskAfterAction = directive.action.foldLeft(task)(processAction)
 
     directive.transition match {
@@ -183,33 +146,46 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
 
 }
 
-trait Directives {
-  /**
-    * Do nothing. Modify nothing.
-    */
-  final val stay = Directive()
+object Directives {
+  sealed trait Action {
+    def withTransition(b: Behavior): Directive =
+      Directive(List(this), Some(b))
+    def andAlso(other: Action): ActionList =
+      ActionList(this :: other :: Nil)
+  }
 
-  /**
-    * Update the persistent ceph storage
-    */
-  final val persist = Persist(_)
+  case class ActionList(actions: List[Action]) {
+    def withTransition(b: Behavior): Directive =
+      Directive(actions, Some(b))
 
-  /**
-    * Change the behavor out after performing any actions
-    */
-  final def transition(behavior: Behavior) = Directive(Nil, Some(behavior))
+    def andAlso(other: Action): ActionList =
+      ActionList(actions :+ other)
+  }
 
-  final val hold = Hold(_, _)
-  final val multi = ActionList(_)
-  final val wantOffers = WantOffers
-  final val offerResponse = OfferResponse(_, _)
-  final val killTask = KillTask
-  final val setBehaviorTimer = SetBehaviorTimer
+  case class Persist(data: PersistentState) extends Action
+  case object KillTask extends Action
+  case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
+  case object WantOffers extends Action
+  case class OfferResponse(offer: PendingOffer, operations: Iterable[Protos.Offer.Operation]) extends Action
+  case class SetBehaviorTimer(id: String, duration: FiniteDuration) extends Action
+  case class Directive(action: List[Action] = Nil, transition: Option[Behavior] = None)
+  val Stay = Directive()
+  final def Transition(behavior: Behavior) = Directive(Nil, Some(behavior))
+
+  object Directive {
+    import scala.language.implicitConversions
+    implicit def fromAction(action: Action): Directive = {
+      Directive(List(action), None)
+    }
+    implicit def fromActionList(actionList: ActionList): Directive = {
+      Directive(actionList.actions, None)
+    }
+  }
+
 }
 
-object Directives extends Directives
-
-trait Behavior extends Directives {
+trait Behavior {
+  import Directives._
   def name = getClass.getSimpleName
 
   @deprecated("use preStart", "now")
@@ -223,12 +199,12 @@ trait Behavior extends Directives {
   /**
     * Method provides an opportunity to set the next step
     */
-  def preStart(state: Task, fullState: Map[String, Task]): Directive = stay
+  def preStart(state: Task, fullState: Map[String, Task]): Directive = Stay
   def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
 }
 
 object Behavior {
-  type DecideFunction = (Task, Map[String, Task]) => Directive
+  type DecideFunction = (Task, Map[String, Task]) => Directives.Directive
   type TransitionFunction = (Task, Map[String, Task]) => Behavior
 }
 

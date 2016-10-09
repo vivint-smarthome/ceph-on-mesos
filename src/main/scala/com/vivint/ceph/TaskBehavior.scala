@@ -17,6 +17,7 @@ import scaldi.Injectable._
 import mesosphere.mesos.protos.Resource.PORTS
 import ProtoHelpers._
 import java.util.Base64
+import Directives._
 
 class TaskBehavior(
   secrets: ClusterSecrets,
@@ -29,25 +30,25 @@ class TaskBehavior(
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
 
-  def decideWhatsNext(state: Task, fullState: Map[String, Task]): Directive = {
+  def decideWhatsNext(state: Task, fullState: Map[String, Task]): Directives.Directive = {
     import Directives._
     state.persistentState match {
       case None =>
-        persist(state.pState).
+        Persist(state.pState).
           withTransition(
             WaitForSync(decideWhatsNext))
       case Some(pState) if state.version != state.persistentVersion =>
         // try again; previous persistence must have timed out.
-        persist(pState).
+        Persist(pState).
           withTransition(
             WaitForSync(decideWhatsNext))
       case Some(pState) =>
         if (pState.reservationConfirmed)
-          transition(Running)
+          Transition(Running)
         else if (pState.slaveId.nonEmpty)
-          transition(WaitForReservation)
+          Transition(WaitForReservation)
         else
-          transition(Matching)
+          Transition(MatchForReservation)
     }
   }
 
@@ -62,7 +63,7 @@ class TaskBehavior(
 
   case class WaitForSync(nextBehavior: DecideFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      setBehaviorTimer("timeout", 30.seconds)
+      SetBehaviorTimer("timeout", 30.seconds)
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -70,29 +71,29 @@ class TaskBehavior(
         case Timer("timeout") =>
           nextBehavior(state, fullState)
         case Timer(_) =>
-          stay
+          Stay
         case TaskUpdated(prior) =>
           if (state.persistentVersion < state.version)
-            stay
+            Stay
           else
             nextBehavior(state, fullState)
         case MatchedOffer(offer, matchResult) =>
-          hold(offer, matchResult)
+          Hold(offer, matchResult)
       }
     }
   }
 
-  case object Matching extends Behavior {
+  case object MatchForReservation extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      wantOffers
+      WantOffers
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer(_) =>
-          stay
+          Stay
         case TaskUpdated(_) =>
-          stay
+          Stay
         case MatchedOffer(pendingOffer, matchResult) =>
           val resources = pendingOffer.offer.resources
           if (resources.forall { r => r.hasReservation }) {
@@ -100,19 +101,19 @@ class TaskBehavior(
             val newState = state.inferPersistedState.copy(
               reservationConfirmed = true,
               slaveId = Some(pendingOffer.slaveId))
-            persist(newState) andAlso hold(pendingOffer, matchResult) withTransition (Running)
+            Persist(newState) andAlso Hold(pendingOffer, matchResult) withTransition (Running)
           } else {
             matchResult match {
               case Some(result) =>
-                offerResponse(
+                OfferResponse(
                   pendingOffer,
                   offerOperations.reserveAndCreateVolumes(frameworkId(), state.taskId, result)).
                   andAlso(
-                    persist(
+                    Persist(
                       state.inferPersistedState.copy(slaveId = Some(pendingOffer.slaveId)))).
                   withTransition(WaitForReservation)
               case None =>
-                offerResponse(pendingOffer, Nil) andAlso wantOffers
+                OfferResponse(pendingOffer, Nil) andAlso WantOffers
             }
           }
       }
@@ -121,34 +122,34 @@ class TaskBehavior(
 
   case object WaitForReservation extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      setBehaviorTimer("timeout", 30.seconds)
+      SetBehaviorTimer("timeout", 30.seconds)
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer("timeout") =>
-          transition(Matching)
+          Transition(MatchForReservation)
         case Timer(_) =>
-          stay
+          Stay
         case MatchedOffer(pendingOffer, matchResult) =>
           if (pendingOffer.offer.resources.exists(_.hasReservation)) {
             val newState = state.inferPersistedState.copy(
               reservationConfirmed = true)
-            persist(newState).
-              andAlso(hold(pendingOffer, matchResult)).
+            Persist(newState).
+              andAlso(Hold(pendingOffer, matchResult)).
               withTransition(WaitForSync(decideWhatsNext))
           } else {
-            hold(pendingOffer, matchResult).withTransition(Matching)
+            Hold(pendingOffer, matchResult).withTransition(MatchForReservation)
           }
         case TaskUpdated(_) =>
-          stay
+          Stay
       }
     }
   }
 
   case class Sleep(duration: FiniteDuration, andThen: DecideFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      setBehaviorTimer("wakeup", duration)
+      SetBehaviorTimer("wakeup", duration)
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -156,19 +157,19 @@ class TaskBehavior(
         case Timer("wakeup") =>
           andThen(state, fullState)
         case Timer(_) | TaskUpdated(_) =>
-          stay
+          Stay
         case MatchedOffer(offer, matchResult) =>
-          hold(offer, matchResult)
+          Hold(offer, matchResult)
       }
     }
   }
 
-  case class KillTask(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
+  case class Killing(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       if (state.runningState.isEmpty)
         throw new IllegalStateException("can't kill a non-running task")
 
-      setBehaviorTimer("timeout", duration).andAlso(killTask)
+      SetBehaviorTimer("timeout", duration).andAlso(KillTask)
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
@@ -176,14 +177,14 @@ class TaskBehavior(
         case Timer("timeout") =>
           preStart(state, fullState)
         case Timer(_) =>
-          stay
+          Stay
         case TaskUpdated(_) =>
           if (state.runningState.isEmpty)
-            transition(andThen(state, fullState))
+            Transition(andThen(state, fullState))
           else
-            stay
+            Stay
         case MatchedOffer(offer, matchResult) =>
-          hold(offer, matchResult)
+          Hold(offer, matchResult)
       }
     }
   }
@@ -212,9 +213,9 @@ class TaskBehavior(
           lazy val quorumMonitorsAreRunning =
             runningMonitors.length > (monitors.length / 2) // NOTE this always fails for mon count [0, 1]
           def becomeRunning =
-            persist(state.pState.copy(goal = Some(RunState.Running)))
+            Persist(state.pState.copy(goal = Some(RunState.Running)))
           def poll =
-            transition(Sleep(5.seconds, { (_, _) => transition(Running) }))
+            Transition(Sleep(5.seconds, { (_, _) => Transition(Running) }))
 
           state.role match {
             case TaskRole.Monitor if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) =>
@@ -228,11 +229,11 @@ class TaskBehavior(
 
         case (_, Some(running), Some(goal)) if running != goal =>
           // current running state does not match goal
-          transition(KillTask(70.seconds, { (_, _) => Running }))
+          Transition(Killing(70.seconds, { (_, _) => Running }))
 
         case (_, _, Some(_)) =>
           // if we already have a goal then proceed
-          stay
+          Stay
         case (Some(launched), _, None) =>
           val jsonRepresentation = model.PlayJsonFormats.TaskWriter.writes(state)
           throw new IllegalStateException(
@@ -243,7 +244,7 @@ class TaskBehavior(
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
       event match {
         case Timer(_) =>
-          stay
+          Stay
         case MatchedOffer(pendingOffer, _) =>
           println(s"Le offer!${pendingOffer.offer}")
           if (state.runningState.nonEmpty)
@@ -253,7 +254,7 @@ class TaskBehavior(
             throw new IllegalStateException("As assumption made by the framework author was wrong")
 
           if(!pendingOffer.offer.resources.exists(_.hasReservation))
-            offerResponse(pendingOffer, Nil)
+            OfferResponse(pendingOffer, Nil)
           else {
             lazy val peers = state.peers(fullState.values)
             lazy val monLocations: Set[ServiceLocation] = fullState.values.
@@ -264,12 +265,12 @@ class TaskBehavior(
             (state.role, state.pState.goal) match {
               case (TaskRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
 
-                persist(
+                Persist(
                   state.pState.copy(
                     location = Some(taskLocation),
                     lastLaunched = Some(desiredState))).
                   andAlso(
-                    offerResponse(
+                    OfferResponse(
                       pendingOffer,
                       launchMonCommand(
                         isLeader = peers.forall(_.pState.goal.isEmpty),
@@ -280,12 +281,12 @@ class TaskBehavior(
                         monLocations = monLocations
                       )))
               case (TaskRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                persist(
+                Persist(
                   state.pState.copy(
                     location = Some(taskLocation),
                     lastLaunched = Some(desiredState))).
                   andAlso(
-                    offerResponse(
+                    OfferResponse(
                       pendingOffer,
                       launchOSDCommand(
                         pendingOffer.offer,
@@ -296,7 +297,7 @@ class TaskBehavior(
 
               case _ =>
                 ???
-                // hold(pendingOffer, None)
+                // Hold(pendingOffer, None)
             }
           }
         case TaskUpdated(_) =>

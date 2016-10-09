@@ -283,9 +283,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     Future.sequence(operations).map(_.flatten)
   }
 
-  def ready: Receive = (
-    {
-      case FrameworkActor.StatusUpdate(taskStatus) if tasks contains taskStatus.getTaskId.getValue =>
+  def ready: Receive = {
+    case FrameworkActor.StatusUpdate(taskStatus) if tasks contains taskStatus.getTaskId.getValue =>
         val priorState = tasks(taskStatus.getTaskId.getValue)
         val nextState = priorState.copy(taskStatus = Some(TaskStatus.fromMesos(taskStatus)))
         tasks.updateTask(nextState)
@@ -304,11 +303,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             }.
             pipeTo(frameworkActor)
         }
-    }: Receive
-  ).
-    orElse(default)
 
-  def default: Receive = {
     case cmd: Command =>
       cmd match {
         case GetTasks =>
