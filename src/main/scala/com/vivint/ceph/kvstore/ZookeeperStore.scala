@@ -28,9 +28,10 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
   val appConfiguration = inject[AppConfiguration]
   val client = CuratorFrameworkFactory.builder.
     connectString(appConfiguration.zookeeper).
-    namespace("ceph-on-mesos").
+    namespace(namespace).
     retryPolicy(retryPolicy).
     build()
+  client.start()
 
   implicit private val ec = ExecutionContext.fromExecutor(
     Executors.newSingleThreadExecutor())
@@ -44,7 +45,7 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
   }
 
   def set(path: String, data: Array[Byte]): Future[Unit] = Future {
-    client.setData.
+      client.setData.
       forPath(path, data)
   }
 

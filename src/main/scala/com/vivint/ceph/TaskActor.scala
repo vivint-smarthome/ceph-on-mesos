@@ -54,7 +54,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     else
       _behaviorSet
 
-  var tasks: Map[String, Task] = Map.empty
+  // var tasks: Map[String, Task] = Map.empty
+  val tasks = new TasksState(log)
+
   var cephConfig: CephConfig = _
 
   val config = inject[AppConfiguration]
@@ -88,6 +90,17 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     import context.dispatcher
 
     configStore.storeConfigIfNotExist()
+    tasks.addSubscriber {
+      case (before, Some(after)) if before.map(_.version).getOrElse(0) != after.version =>
+        // version changed?
+        import context.dispatcher
+        taskStore.save(after.pState).map(_ => PersistSuccess(after.taskId, after.version)) pipeTo self
+    }
+    tasks.addSubscriber {
+      case (Some(before), Some(after)) =>
+        tasks.updateTask(
+          processEvents(after, List(TaskFSM.TaskUpdated(before))))
+    }
 
     log.info("pulling initial state for TaskActor")
     def logging[T](f: Future[T], desc: String): Future[T] = {
@@ -124,7 +137,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       processEvents(
         processDirective(
           task,
-          task.behavior.submit(event, task, tasks)),
+          task.behavior.submit(event, task, tasks.all)),
         rest)
     case Nil =>
       task
@@ -185,7 +198,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   final def initializeBehavior(task: Task): Task = {
     log.info("task {}: Initializing behavior {}", task.taskId, task.behavior.name)
     processDirective(task,
-      task.behavior.initialize(task, tasks))
+      task.behavior.initialize(task, tasks.all))
   }
 
   def receive = {
@@ -197,7 +210,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       val newTasks = persistentTaskStates.map { p =>
         initializeBehavior(Task.fromState(p))
       }
-      newTasks.foreach(updateTask)
+      newTasks.foreach(tasks.updateTask)
 
       unstashAll()
       startReconciliation()
@@ -212,7 +225,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   def startReconciliation(): Unit = {
     reconciliationTimer.cancel() // clear out any existing timers
     var taskIdsForReconciliation: Set[String] =
-      tasks.values.flatMap { _.taskStatus.map(_.getTaskId.getValue) }(breakOut)
+      tasks.values.flatMap { _.taskStatus.map(_.taskId) }(breakOut)
     if (taskIdsForReconciliation.isEmpty) {
       log.info("Skipping reconciliation; no known tasks to reconcile")
       context.become(ready)
@@ -221,7 +234,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     log.info("Beginning reconciliation")
     reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
     var reconciledResult = List.empty[(Task, Protos.TaskStatus)]
-    frameworkActor ! FrameworkActor.Reconcile(tasks.values.flatMap(_.taskStatus)(breakOut))
+    frameworkActor ! FrameworkActor.Reconcile(tasks.values.flatMap(_.taskStatus).map(_.toMesos)(breakOut))
     context.become {
       case ReconcileTimeout =>
         throw new Exception("timeout during reconciliation")
@@ -248,10 +261,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         if (taskIdsForReconciliation.isEmpty) {
           reconciledResult.foreach { case (task, taskStatus) =>
-            updateTask(
-              processEvents(
-                task.copy(taskStatus = Some(taskStatus)),
-                List(TaskFSM.TaskUpdated(task))))
+            tasks.updateTask(task.copy(taskStatus = Some(TaskStatus.fromMesos(taskStatus))))
           }
 
           reconciliationTimer.cancel()
@@ -272,29 +282,29 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
-  /** Given an updated task status, persists if persistance has changed (further mondifying the nextVersion).
-    * Returns the modified version.
-    *
-    * TODO - Extract and lock down valid operations. Nobody should be able to update the task state without going
-    * through this method.
-    */
-  def updateTask(update: Task): Task = {
-    val nextTask =
-      if (tasks.get(update.taskId).flatMap(_.persistentState) != update.persistentState) {
-        import context.dispatcher
-        val nextVersion = update.version + 1
-        taskStore.save(update.pState).map(_ => PersistSuccess(update.taskId, nextVersion)) pipeTo self
-        update.copy(
-          version = nextVersion)
-      } else {
-        update
-      }
+  // /** Given an updated task status, persists if persistance has changed (further mondifying the nextVersion).
+  //   * Returns the modified version.
+  //   *
+  //   * TODO - Extract and lock down valid operations. Nobody should be able to update the task state without going
+  //   * through this method.
+  //   */
+  // def updateTask(update: Task): Task = {
+  //   val nextTask =
+  //     if (tasks.get(update.taskId).flatMap(_.persistentState) != update.persistentState) {
+  //       import context.dispatcher
+  //       val nextVersion = update.version + 1
+  //       taskStore.save(update.pState).map(_ => PersistSuccess(update.taskId, nextVersion)) pipeTo self
+  //       update.copy(
+  //         version = nextVersion)
+  //     } else {
+  //       update
+  //     }
 
-    if (log.isDebugEnabled)
-    log.debug("task updated: {}", model.PlayJsonFormats.TaskWriter.writes(nextTask))
-    tasks = tasks.updated(update.taskId, nextTask)
-    nextTask
-  }
+  //   if (log.isDebugEnabled)
+  //   log.debug("task updated: {}", model.PlayJsonFormats.TaskWriter.writes(nextTask))
+  //   tasks = tasks.updated(update.taskId, nextTask)
+  //   nextTask
+  // }
 
   /** Looking at reservation labels, routes the offer to the appropriate
     *
@@ -318,13 +328,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     val operations = reservedGroupings.map {
       case ((Some(taskId), Some(OurFrameworkId())), resources)
           if tasks.get(taskId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
-        println("********************************************************************************")
-        println(s"Le resident offer ${offer}")
         val task = tasks(taskId)
-        println(model.PlayJsonFormats.TaskWriter.writes( task))
         val pendingOffer = PendingOffer(offer.withResources(resources))
 
-        updateTask(
+        tasks.updateTask(
           processEvents(task, List(TaskFSM.MatchedOffer(pendingOffer, None))))
 
         pendingOffer.resultingOperations
@@ -348,7 +355,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           case Some((matchResult, task)) =>
             // TODO - we need to do something with this result
             val pendingOffer = PendingOffer(matchCandidateOffer)
-            updateTask {
+            tasks.updateTask {
               processEvents(
                 task.copy(wantingNewOffer = false, offerMatcher = None),
                 TaskFSM.MatchedOffer(pendingOffer, Some(matchResult)) :: Nil)}
@@ -367,9 +374,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     {
       case FrameworkActor.StatusUpdate(taskStatus) if tasks contains taskStatus.getTaskId.getValue =>
         val priorState = tasks(taskStatus.getTaskId.getValue)
-        val nextState = priorState.copy(taskStatus = Some(taskStatus))
-        updateTask(
-          processEvents(nextState, List(TaskFSM.TaskUpdated(priorState))))
+        val nextState = priorState.copy(taskStatus = Some(TaskStatus.fromMesos(taskStatus)))
+        tasks.updateTask(nextState)
 
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { offer =>
@@ -393,7 +399,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     case cmd: Command =>
       cmd match {
         case GetTasks =>
-          sender ! tasks
+          sender ! tasks.all
 
         case UpdateGoal(taskId, goal) =>
           tasks.get(taskId) foreach {
@@ -401,9 +407,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
               log.error("Unabled to update run goal for taskId {}; it is not ready", taskId)
             case task =>
               val nextTask = task.copy(persistentState = Some(task.pState.copy(goal = Some(goal))))
-              updateTask(
-                processEvents(
-                  nextTask, List(TaskFSM.TaskUpdated(task))))
+              tasks.updateTask(nextTask)
           }
       }
 
@@ -417,16 +421,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       log.warning("Ceph config went missing / unparseable. Changes not applied")
     case TaskTimer(taskId, payload) =>
       tasks.get(taskId) foreach { task =>
-        updateTask(
+        tasks.updateTask(
           processEvents(task, List(TaskFSM.Timer(payload))))
       }
     case PersistSuccess(taskId, version) =>
-      tasks.get(taskId) foreach { task =>
-        updateTask(
-          processEvents(
-            task.copy(persistentVersion = Math.max(task.persistentVersion, version)),
-            List(TaskFSM.TaskUpdated(task))))
-      }
+      tasks.updatePersistence(taskId, version)
   }
 
   def applyConfiguration(): Unit = {
@@ -448,14 +447,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     log.info("added {} new monitors, {} new OSDs as a result of config update", newMonitors.length, newOSDs.length)
 
-    (newMonitors ++ newOSDs).map(updateTask)
+    (newMonitors ++ newOSDs).map(tasks.updateTask)
     offerMatchers = offerMatchFactory(cephConfig)
 
     var matchersUpdated = false
-    tasks.foreach { case (taskId, task) =>
+    tasks.values.foreach { task =>
       if (task.wantingNewOffer) {
         matchersUpdated = true
-        updateTask(
+        tasks.updateTask(
           task.copy(offerMatcher = offerMatchers.get(task.role)))
       }
     }

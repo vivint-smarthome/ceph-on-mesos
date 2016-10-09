@@ -48,7 +48,7 @@ object PlayJsonFormats{
       "persistentVersion" -> task.persistentVersion,
       "behavior" -> task.behavior.name,
       "wantingNewOffer" -> task.wantingNewOffer,
-      "taskStatus" -> task.taskStatus.map(_.getState.getValueDescriptor.getName)
+      "taskStatus" -> task.taskStatus.map(_.state.name)
     )
 
   }

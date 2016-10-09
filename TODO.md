@@ -26,10 +26,10 @@
 
 # Code cleanup
 
-- Extract task state tracking from TaskActor. Guard operations.
-- Emit TaskChanged messages as part of nodeupdated; concern too scattered.
-- Extract launch strategy from node behavior.
-- Extract common behaviors into it's own library.
-- Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
-  lastLaunched changed.
+- [x] Extract task state tracking from TaskActor. Guard operations.
+- [x] Emit TaskChanged messages as part of nodeupdated; concern too scattered.
+- [ ] Extract launch strategy from node behavior.
+- [ ] Extract common behaviors into it's own library.
+- [ ] Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
+      lastLaunched changed.
 
