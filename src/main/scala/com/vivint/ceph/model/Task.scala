@@ -71,14 +71,14 @@ case class Task(
       role = role))
 
   def peers(p: Iterable[Task]): Iterable[Task] =
-    p.filter { peer => (peer.role == this.role) && peer != this }
+    p.filter { peer => (peer.role == this.role) && peer.id != this.id }
 
-  def goal = pState.goal
-  def lastLaunched = pState.lastLaunched
-  def slaveId = pState.slaveId
+  lazy val goal = pState.goal
+  lazy val lastLaunched = pState.lastLaunched
+  lazy val slaveId = pState.slaveId
 
-  @deprecated("move to pState", "")
-  def inferPersistedState: PersistentState = pState
+  def withGoal(goal: Option[RunState.EnumVal]): Task =
+    copy(persistentState = Some(pState.copy(goal = goal)))
 
   /** If task is running
     */

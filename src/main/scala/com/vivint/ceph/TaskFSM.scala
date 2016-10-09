@@ -201,6 +201,13 @@ trait Behavior {
     */
   def preStart(state: Task, fullState: Map[String, Task]): Directive = Stay
   def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
+
+  protected def handleWith(event: Event)(handler: PartialFunction[TaskFSM.Event, Directive]): Directive = {
+    if (handler.isDefinedAt(event))
+      handler(event)
+    else
+      Stay
+  }
 }
 
 object Behavior {

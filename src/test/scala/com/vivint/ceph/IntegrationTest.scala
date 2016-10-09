@@ -424,7 +424,6 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer, reservationOffer2))
 
-
     val launchedTaskId = inside(gatherResponse(probe, reservationOffer, ignoreRevive)) {
       case offerResponse: FrameworkActor.AcceptOffer =>
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
@@ -441,12 +440,18 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       values.
       partition(_.taskId == launchedTaskId)
 
-    unlaunchedTask.behavior.name shouldBe ("Sleep")
+    unlaunchedTask.behavior.name shouldBe ("WaitForGoal")
 
-    taskActor ! TaskActor.TaskTimer(unlaunchedTask.taskId, "wakeup")
+    taskActor ! FrameworkActor.StatusUpdate(
+      newTaskStatus(launchedTask.taskId, launchedTask.slaveId.get, Protos.TaskState.TASK_RUNNING))
 
-    val snapshotAfterWake = await((taskActor ? TaskActor.GetTasks).mapTo[Map[String, Task]])(unlaunchedTask.taskId)
-
-    unlaunchedTask.behavior.name shouldBe ("Sleep")
+    inside(gatherResponse(probe, reservationOffer2, ignoreRevive)) {
+      case offerResponse: FrameworkActor.AcceptOffer =>
+        offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+        val List(task) = offerResponse.operations(0).getLaunch.tasks
+        val shCommand = task.getCommand.getValue
+        shCommand.contains("entrypoint.sh mon") shouldBe true
+        shCommand.contains("ceph mon getmap") shouldBe true
+    }
   }
 }

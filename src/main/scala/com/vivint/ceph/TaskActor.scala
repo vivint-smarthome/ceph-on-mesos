@@ -81,6 +81,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     })).
     run
 
+  val orchestrator = new Orchestrator(tasks)
+
   override def preStart(): Unit = {
     import context.dispatcher
 
@@ -155,21 +157,21 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       stash()
   }
 
-  case object ReconcileTimeout
 
-  object DummyCancellable extends Cancellable { def cancel(): Boolean = true; def isCancelled = true }
-  var reconciliationTimer: Cancellable = DummyCancellable
   def startReconciliation(): Unit = {
-    reconciliationTimer.cancel() // clear out any existing timers
+    case object ReconcileTimeout
+
     var taskIdsForReconciliation: Set[String] =
       tasks.values.flatMap { _.taskStatus.map(_.taskId) }(breakOut)
+
     if (taskIdsForReconciliation.isEmpty) {
       log.info("Skipping reconciliation; no known tasks to reconcile")
       context.become(ready)
       return ()
     }
+
     log.info("Beginning reconciliation")
-    reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
+    val reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
     var reconciledResult = List.empty[(Task, Protos.TaskStatus)]
     frameworkActor ! FrameworkActor.Reconcile(tasks.values.flatMap(_.taskStatus).map(_.toMesos)(breakOut))
     context.become {

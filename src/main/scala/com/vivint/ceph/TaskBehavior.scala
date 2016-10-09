@@ -98,7 +98,7 @@ class TaskBehavior(
           val resources = pendingOffer.offer.resources
           if (resources.forall { r => r.hasReservation }) {
 
-            val newState = state.inferPersistedState.copy(
+            val newState = state.pState.copy(
               reservationConfirmed = true,
               slaveId = Some(pendingOffer.slaveId))
             Persist(newState) andAlso Hold(pendingOffer, matchResult) withTransition (Running)
@@ -110,7 +110,7 @@ class TaskBehavior(
                   offerOperations.reserveAndCreateVolumes(frameworkId(), state.taskId, result)).
                   andAlso(
                     Persist(
-                      state.inferPersistedState.copy(slaveId = Some(pendingOffer.slaveId)))).
+                      state.pState.copy(slaveId = Some(pendingOffer.slaveId)))).
                   withTransition(WaitForReservation)
               case None =>
                 OfferResponse(pendingOffer, Nil) andAlso WantOffers
@@ -133,7 +133,7 @@ class TaskBehavior(
           Stay
         case MatchedOffer(pendingOffer, matchResult) =>
           if (pendingOffer.offer.resources.exists(_.hasReservation)) {
-            val newState = state.inferPersistedState.copy(
+            val newState = state.pState.copy(
               reservationConfirmed = true)
             Persist(newState).
               andAlso(Hold(pendingOffer, matchResult)).
@@ -164,6 +164,12 @@ class TaskBehavior(
     }
   }
 
+
+  val holdingOffers: PartialFunction[TaskFSM.Event, Directive] = {
+    case MatchedOffer(offer, matchResult) =>
+      Hold(offer, matchResult)
+  }
+
   case class Killing(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
       if (state.runningState.isEmpty)
@@ -173,18 +179,24 @@ class TaskBehavior(
     }
 
     def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
-      event match {
-        case Timer("timeout") =>
-          preStart(state, fullState)
-        case Timer(_) =>
-          Stay
-        case TaskUpdated(_) =>
-          if (state.runningState.isEmpty)
+      handleWith(event) {
+        holdingOffers orElse {
+          case Timer("timeout") =>
+            preStart(state, fullState)
+          case TaskUpdated(_) if (state.runningState.isEmpty) =>
             Transition(andThen(state, fullState))
-          else
-            Stay
-        case MatchedOffer(offer, matchResult) =>
-          Hold(offer, matchResult)
+        }
+      }
+    }
+  }
+
+  case class WaitForGoal(andThen: TransitionFunction) extends Behavior {
+    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+      handleWith(event) {
+        holdingOffers orElse {
+          case TaskUpdated(_) if (state.goal.nonEmpty) =>
+            Transition(andThen(state, fullState))
+        }
       }
     }
   }
@@ -204,28 +216,8 @@ class TaskBehavior(
 
     def nextRunAction(state: Task, fullState: Map[String, Task]): Directive = {
       (state.lastLaunched, state.runningState, state.goal) match {
-        case (None, None, None) =>
-          // This is our first launch. See if it's okay to initialize. This is where we implement the behavior for tasks
-          // to wait for monitors to run
-          /* TODO - move this logic to orchestrator!!! */
-          val monitors = getMonitors(fullState)
-          lazy val runningMonitors = monitors.filter(_.runningState == Some(RunState.Running)).toList
-          lazy val quorumMonitorsAreRunning =
-            runningMonitors.length > (monitors.length / 2) // NOTE this always fails for mon count [0, 1]
-          def becomeRunning =
-            Persist(state.pState.copy(goal = Some(RunState.Running)))
-          def poll =
-            Transition(Sleep(5.seconds, { (_, _) => Transition(Running) }))
-
-          state.role match {
-            case TaskRole.Monitor if (runningMonitors.nonEmpty || (monitors.forall(_.pState.goal.isEmpty))) =>
-              // am I the first or are others running?
-              becomeRunning
-            case _ if (quorumMonitorsAreRunning) =>
-              becomeRunning
-            case _ =>
-              poll
-          }
+        case (_, _, None) =>
+          Transition(WaitForGoal( { (_,_) => Running }))
 
         case (_, Some(running), Some(goal)) if running != goal =>
           // current running state does not match goal
@@ -246,7 +238,6 @@ class TaskBehavior(
         case Timer(_) =>
           Stay
         case MatchedOffer(pendingOffer, _) =>
-          println(s"Le offer!${pendingOffer.offer}")
           if (state.runningState.nonEmpty)
             /* We shouldn't get the persistent offer for a task unless if the task is dead, so we shouldn't have to
              * worry about this. Unless if two persistent offers were made for a task, on the same slave... which semes
@@ -264,6 +255,7 @@ class TaskBehavior(
 
             (state.role, state.pState.goal) match {
               case (TaskRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+                println(s"peers = ${peers.map(_.pState.goal)}")
 
                 Persist(
                   state.pState.copy(
