@@ -82,6 +82,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     run
 
   val orchestrator = new Orchestrator(tasks)
+  val lock = kvStore.lock(Constants.LockPath)
 
   override def preStart(): Unit = {
     import context.dispatcher
@@ -108,7 +109,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       f
     }
 
-    logging(kvStore.lock(Constants.LockPath), "acquiring lock").
+    logging(lock, "acquiring lock").
       flatMap { _ =>
         tSequence(
           logging(taskStore.getTasks, "taskStore.getTasks"),
@@ -121,6 +122,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   override def postStop(): Unit = {
+    // try and release the lock
+    lock.foreach { _.cancel() }(context.dispatcher)
+
     configStream.cancel()
     throttledRevives.complete()
   }
