@@ -26,13 +26,19 @@ case class OSDDeploymentConfig(
   max_per_host: Int
 )
 
-
-object ConfigHelpers {
-}
+case class RGWDeploymentConfig(
+  count: Int,
+  cpus: Double,
+  mem: Double,
+  port: Option[Int],
+  docker_flags: List[String],
+  max_per_host: Int
+)
 
 case class DeploymentConfig(
   mon: MonDeploymentConfig,
-  osd: OSDDeploymentConfig
+  osd: OSDDeploymentConfig,
+  rgw: RGWDeploymentConfig
 )
 
 case class CephSettings(
@@ -62,6 +68,11 @@ deployment {
   osd {
     disk_type = root
     max_per_host = 1
+  }
+
+  rgw {
+    max_per_host = 1
+    docker_flags = []
   }
 }
 

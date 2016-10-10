@@ -340,25 +340,26 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def applyConfiguration(): Unit = {
-    val monTasks = tasks.values.filter ( _.role == TaskRole.Monitor)
-    val newMonitorCount = Math.max(0, cephConfig.deployment.mon.count - monTasks.size)
-    val newMonitors = Stream.
-      continually { Task.forRole(TaskRole.Monitor, taskFSM.defaultBehavior) }.
-      take(newMonitorCount).
-      map(taskFSM.initializeBehavior).
-      toList
+    val newTasks = List(
+      TaskRole.Monitor -> cephConfig.deployment.mon.count,
+      TaskRole.RGW -> cephConfig.deployment.rgw.count,
+      TaskRole.OSD -> cephConfig.deployment.osd.count).
+      flatMap {
+        case (role, size) =>
+          val roleTasks = tasks.values.filter( _.role == role)
+          val newCount = Math.max(0, size - roleTasks.size)
+          Stream.
+            continually { Task.forRole(role, taskFSM.defaultBehavior) }.
+            take(newCount).
+            map(taskFSM.initializeBehavior)
+      }.toList
 
-    val cephTasks = tasks.values.filter (_.role == TaskRole.OSD)
-    val newOSDCount = Math.max(0, cephConfig.deployment.osd.count - cephTasks.size)
-    val newOSDs = Stream.
-      continually { Task.forRole(TaskRole.OSD, taskFSM.defaultBehavior) }.
-      take(newOSDCount).
-      map(taskFSM.initializeBehavior).
-      toList
+    if (log.isInfoEnabled) {
+      val newDesc = newTasks.groupBy(_.role).map { case (r, vs) => s"${r} -> ${vs.length}" }.mkString(", ")
+      log.info("added {} as a result of config update", newDesc)
+    }
 
-    log.info("added {} new monitors, {} new OSDs as a result of config update", newMonitors.length, newOSDs.length)
-
-    (newMonitors ++ newOSDs).map(tasks.updateTask)
+    newTasks.foreach(tasks.updateTask)
     offerMatchers = offerMatchFactory(cephConfig)
 
     if (tasks.values.exists(_.wantingNewOffer)) {

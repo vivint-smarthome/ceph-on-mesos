@@ -30,6 +30,36 @@ object OfferMatchFactory {
 trait OfferMatchFactory extends (CephConfig => Map[TaskRole.EnumVal, OfferMatcher]) {
 }
 
+class RGWOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends OfferMatcher {
+  val selector = ResourceMatcher.ResourceSelector.any(Set("*", frameworkRole))
+
+  val resourceMatchers = {
+    val selector = ResourceMatcher.ResourceSelector.any(Set("*", frameworkRole))
+    val rgwConfig = cephConfig.deployment.rgw
+
+    val portMatcher = if (rgwConfig.port.isEmpty)
+      Some(new lib.SinglePortMatcher(selector))
+    else
+      None
+
+    List(
+      new ScalarResourceMatcher(
+        CPUS, cephConfig.deployment.rgw.cpus, selector, ScalarMatchResult.Scope.NoneDisk),
+      new ScalarResourceMatcher(
+        MEM, cephConfig.deployment.rgw.mem, selector, ScalarMatchResult.Scope.NoneDisk)
+    ) ++ portMatcher
+  }
+
+  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+    val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
+    if (count < cephConfig.deployment.rgw.max_per_host) {
+      ResourceMatcher.matchResources(offer, resourceMatchers, selector)
+    } else {
+      None
+    }
+  }
+}
+
 class OSDOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends OfferMatcher {
   val selector = ResourceMatcher.ResourceSelector.any(Set("*", frameworkRole))
 
@@ -107,7 +137,8 @@ class MasterOfferMatchFactory(implicit inj: Injector) extends OfferMatchFactory 
   def apply(cephConfig: CephConfig): Map[TaskRole.EnumVal, OfferMatcher] = {
     Map(
       TaskRole.Monitor -> (new MonOfferMatcher(cephConfig, frameworkRole = config.role)),
-      TaskRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role))
+      TaskRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role)),
+      TaskRole.RGW -> (new RGWOfferMatcher(cephConfig, frameworkRole = config.role))
     )
   }
 }
