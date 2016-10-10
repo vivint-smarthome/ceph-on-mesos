@@ -81,9 +81,12 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   private def processHeldEvents(task: Task): Task = {
     task.heldOffer match {
       case Some((offer, resourceMatch)) =>
-        processEvents(
-          task.copy(heldOffer = None),
-          TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
+        if (offer.resultingOperationsPromise.isCompleted)
+          tasks.updateTask(task.copy(heldOffer = None))
+        else
+          processEvents(
+            task.copy(heldOffer = None),
+            TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
       case None =>
         task
     }
@@ -102,6 +105,9 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         task.copy(pState = data)
       case Directives.SetBehaviorTimer(name, duration: FiniteDuration) =>
         setBehaviorTimer(task, name, duration)
+        task
+      case Directives.Revive =>
+        revive()
         task
       case Directives.WantOffers =>
         revive()
@@ -166,6 +172,7 @@ object Directives {
   case object KillTask extends Action
   case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
   case object WantOffers extends Action
+  case object Revive extends Action
   case class OfferResponse(offer: PendingOffer, operations: Iterable[Protos.Offer.Operation]) extends Action
   case class SetBehaviorTimer(id: String, duration: FiniteDuration) extends Action
   case class Directive(action: List[Action] = Nil, transition: Option[Behavior] = None)

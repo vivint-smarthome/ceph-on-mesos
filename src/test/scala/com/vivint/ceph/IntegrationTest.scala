@@ -424,7 +424,9 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer, reservationOffer2))
 
-    val launchedTaskId = inside(gatherResponse(probe, reservationOffer, ignoreRevive)) {
+    val reservedResponses = gatherResponses(probe, List(reservationOffer, reservationOffer2), ignore = ignoreRevive)
+
+    val launchedTaskId = inside(reservedResponses(reservationOffer)) {
       case offerResponse: FrameworkActor.AcceptOffer =>
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
         val List(task) = offerResponse.operations(0).getLaunch.tasks
@@ -432,6 +434,11 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         shCommand.contains("entrypoint.sh mon") shouldBe true
         shCommand.contains("ceph mon getmap") shouldBe false
         task.getTaskId.getValue
+    }
+
+    inside(reservedResponses(reservationOffer2)) {
+      case offerResponse: FrameworkActor.DeclineOffer =>
+        ()
     }
 
     implicit val timeout = Timeout(3.seconds)
@@ -444,6 +451,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     taskActor ! FrameworkActor.StatusUpdate(
       newTaskStatus(launchedTask.taskId, launchedTask.slaveId.get, Protos.TaskState.TASK_RUNNING))
+
+    taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer2))
 
     inside(gatherResponse(probe, reservationOffer2, ignoreRevive)) {
       case offerResponse: FrameworkActor.AcceptOffer =>

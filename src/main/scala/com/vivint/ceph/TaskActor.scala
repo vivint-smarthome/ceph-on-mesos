@@ -225,6 +225,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
+  def pendingOfferWithDeadline(offer: Protos.Offer, deadline:FiniteDuration = 5.seconds): PendingOffer = {
+    val pendingOffer = PendingOffer(offer)
+    context.system.scheduler.scheduleOnce(deadline) {
+      pendingOffer.resultingOperationsPromise.trySuccess(Nil)
+    }(context.dispatcher)
+    pendingOffer
+  }
+
   /** Looking at reservation labels, routes the offer to the appropriate
     *
     */
@@ -248,7 +256,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       case ((Some(taskId), Some(OurFrameworkId())), resources)
           if tasks.get(taskId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
         val task = tasks(taskId)
-        val pendingOffer = PendingOffer(offer.withResources(resources))
+        val pendingOffer = pendingOfferWithDeadline(offer.withResources(resources))
 
         // TODO - move updateTask to taskFSM
         taskFSM.handleEvent(task, TaskFSM.MatchedOffer(pendingOffer, None))
@@ -273,7 +281,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         matchingTask match {
           case Some((matchResult, task)) =>
             // TODO - we need to do something with this result
-            val pendingOffer = PendingOffer(matchCandidateOffer)
+            val pendingOffer = pendingOfferWithDeadline(matchCandidateOffer)
             taskFSM.handleEvent(
               task.copy(wantingNewOffer = false),
               TaskFSM.MatchedOffer(pendingOffer, Some(matchResult)))
