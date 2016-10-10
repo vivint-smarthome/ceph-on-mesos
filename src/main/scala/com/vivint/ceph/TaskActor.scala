@@ -313,10 +313,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         case UpdateGoal(taskId, goal) =>
           tasks.get(taskId) foreach {
-            case task if task.persistentState.isEmpty || task.pState.goal.isEmpty =>
+            case task if task.pState.goal.isEmpty =>
               log.error("Unabled to update run goal for taskId {}; it is not ready", taskId)
             case task =>
-              val nextTask = task.copy(persistentState = Some(task.pState.copy(goal = Some(goal))))
+              val nextTask = task.withGoal(Some(goal))
               tasks.updateTask(nextTask)
           }
       }

@@ -99,7 +99,7 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         }
         task.copy(heldOffer = Some((offer, resourceMatch)))
       case Directives.Persist(data) =>
-        task.copy(persistentState = Some(data))
+        task.copy(pState = data)
       case Directives.SetBehaviorTimer(name, duration: FiniteDuration) =>
         setBehaviorTimer(task, name, duration)
         task

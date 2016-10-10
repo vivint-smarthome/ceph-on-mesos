@@ -3,6 +3,7 @@
 ## definitely
 
 - [ ] Packaging
+- [ ] Mesos DNS discovery / srv records
 - [ ] Simple web UI
 - [ ] Configurable secret to protect access to pull ceph config
 - [ ] Permissive resource releases. It would be better that a bug result in resources not being released, than release

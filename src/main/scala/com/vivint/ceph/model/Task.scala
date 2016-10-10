@@ -48,7 +48,7 @@ case class Task(
   cluster: String,
   role: TaskRole.EnumVal,
   version: Long = 0,
-  persistentState: Option[PersistentState] = None,
+  pState: PersistentState,
   behavior: Behavior,
   persistentVersion: Long = 0,
   wantingNewOffer: Boolean = false,
@@ -64,12 +64,6 @@ case class Task(
     require(s.taskId == taskId, "Critical error - TaskStatus must match generated task state")
   }
 
-  lazy val pState = persistentState.getOrElse(
-    PersistentState(
-      id = id,
-      cluster = cluster,
-      role = role))
-
   def peers(p: Iterable[Task]): Iterable[Task] =
     p.filter { peer => (peer.role == this.role) && peer.id != this.id }
 
@@ -78,7 +72,7 @@ case class Task(
   lazy val slaveId = pState.slaveId
 
   def withGoal(goal: Option[RunState.EnumVal]): Task =
-    copy(persistentState = Some(pState.copy(goal = goal)))
+    copy(pState = pState.copy(goal = goal))
 
   /** If task is running
     */
@@ -92,30 +86,33 @@ case class Task(
 }
 
 object Task {
-  def newTask(id: UUID, cluster: String, role: TaskRole.EnumVal, persistentState: Option[PersistentState],
+  def newTask(id: UUID, cluster: String, role: TaskRole.EnumVal, pState: PersistentState,
     defaultBehavior: TaskRole.EnumVal => Behavior): Task = {
 
     val taskId = makeTaskId(role = role, cluster = cluster, id = id)
     val taskStatus = for {
-      p <- persistentState
-      slaveId <- p.slaveId
+      slaveId <- pState.slaveId
     } yield TaskStatus(taskId, slaveId, TaskState.TaskLost)
 
     Task(
       id = id,
       cluster = cluster,
       role = role,
-      persistentState = persistentState,
+      pState = pState,
       behavior = defaultBehavior(role),
-      taskStatus = taskStatus)
+      taskStatus = taskStatus,
+      persistentVersion = 0,
+      version = 1
+    )
   }
 
   def forRole(role: TaskRole.EnumVal, defaultBehavior: TaskRole.EnumVal => Behavior): Task = {
+    val id = UUID.randomUUID
     newTask(
-      id = UUID.randomUUID,
+      id = id,
       cluster = Constants.DefaultCluster,
       role = role,
-      persistentState = None,
+      pState = PersistentState(id = id, cluster = Constants.DefaultCluster, role = role),
       defaultBehavior = defaultBehavior)
   }
 
@@ -125,7 +122,7 @@ object Task {
       id = state.id,
       cluster = state.cluster,
       role = state.role,
-      persistentState = Some(state),
+      pState = state,
       defaultBehavior = defaultBehavior
     )
   }

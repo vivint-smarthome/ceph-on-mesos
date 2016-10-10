@@ -31,7 +31,7 @@ class TasksState(log: LoggingAdapter) {
       return update
 
     val nextTask =
-      if (_tasks.get(update.taskId).flatMap(_.persistentState) != update.persistentState) {
+      if (_tasks.get(update.taskId).map(_.pState) != Some(update.pState)) {
         val nextVersion = update.version + 1
         update.copy(
           version = nextVersion)

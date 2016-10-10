@@ -1,13 +1,9 @@
 package com.vivint.ceph
 
-import akka.actor.{ ActorContext, Cancellable }
-import java.util.concurrent.atomic.AtomicInteger
-import mesosphere.mesos.protos.TaskStatus
 import org.apache.mesos.Protos
-import com.vivint.ceph.model.{ TaskRole, RunState, PersistentState, CephConfig, Task, ServiceLocation }
+import com.vivint.ceph.model.{ TaskRole, RunState, CephConfig, Task, ServiceLocation }
 import TaskFSM._
 import Behavior._
-import scala.annotation.tailrec
 import scala.collection.immutable.NumericRange
 import scala.concurrent.duration._
 import scala.collection.breakOut
@@ -32,17 +28,13 @@ class TaskBehavior(
 
   def decideWhatsNext(state: Task, fullState: Map[String, Task]): Directives.Directive = {
     import Directives._
-    state.persistentState match {
-      case None =>
-        Persist(state.pState).
-          withTransition(
-            WaitForSync(decideWhatsNext))
-      case Some(pState) if state.version != state.persistentVersion =>
+    state.pState match {
+      case pState if state.version != state.persistentVersion =>
         // try again; previous persistence must have timed out.
         Persist(pState).
           withTransition(
             WaitForSync(decideWhatsNext))
-      case Some(pState) =>
+      case pState =>
         if (pState.reservationConfirmed)
           Transition(Running)
         else if (pState.slaveId.nonEmpty)
