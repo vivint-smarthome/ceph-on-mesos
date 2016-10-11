@@ -81,12 +81,9 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   private def processHeldEvents(task: Task): Task = {
     task.heldOffer match {
       case Some((offer, resourceMatch)) =>
-        if (offer.resultingOperationsPromise.isCompleted)
-          tasks.updateTask(task.copy(heldOffer = None))
-        else
-          processEvents(
-            task.copy(heldOffer = None),
-            TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
+        processEvents(
+          task.copy(heldOffer = None),
+          TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
       case None =>
         task
     }
@@ -110,8 +107,12 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         revive()
         task
       case Directives.WantOffers =>
-        revive()
-        task.copy(wantingNewOffer = true)
+        if (task.heldOffer.isEmpty) {
+          revive()
+          task.copy(wantingNewOffer = true)
+        } else {
+          task
+        }
       case Directives.KillTask =>
         killTask(task.taskId)
         task
@@ -124,6 +125,11 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   final def handleEvent(task: Task, event: TaskFSM.Event): Unit = {
     tasks.updateTask(
       processEvents(task, List(event)))
+  }
+
+  final def initialize(task: Task): Unit = {
+    tasks.updateTask(
+      initializeBehavior(task))
   }
 
   private final def processDirective(task: Task, directive: Directives.Directive): Task = {
@@ -141,10 +147,15 @@ class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
     }
   }
 
-  final def initializeBehavior(task: Task): Task = {
+  private final def initializeBehavior(task: Task): Task = {
     log.info("task {}: Initializing behavior {}", task.taskId, task.behavior.name)
-    processDirective(task,
-      task.behavior.preStart(task, tasks.all))
+    val maybeRemoveHeldOffer =
+      if (task.heldOffer.map(_._1.resultingOperationsPromise.isCompleted).contains(true))
+        task.copy(heldOffer = None)
+      else
+        task
+    processDirective(maybeRemoveHeldOffer,
+      task.behavior.preStart(maybeRemoveHeldOffer, tasks.all))
   }
 
   def defaultBehavior(role: TaskRole.EnumVal): Behavior =
@@ -158,6 +169,8 @@ object Directives {
       Directive(List(this), Some(b))
     def andAlso(other: Action): ActionList =
       ActionList(this :: other :: Nil)
+    def andAlso(other: Directive): Directive =
+      other.copy(action = this :: other.action)
   }
 
   case class ActionList(actions: List[Action]) {

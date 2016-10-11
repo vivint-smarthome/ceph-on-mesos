@@ -37,7 +37,35 @@ object PlayJsonFormats{
 
   implicit val RunStateFormat = enumFormat(RunState)
   implicit val TaskRoleFormat = enumFormat(TaskRole)
-  implicit val ServiceLocationFormat = Json.format[ServiceLocation]
+  implicit val LocationFormat = new Format[Location] {
+    def reads(js: JsValue): JsResult[Location] =
+      for {
+        hostname <- (js \ "hostname").validateOpt[String]
+        ip <- (js \ "ip").validateOpt[String]
+        port <- (js \ "port").validateOpt[Int]
+      } yield {
+        (hostname, ip, port) match {
+          case (Some(hostname), Some(ip), Some(port)) =>
+            ServiceLocation(hostname, ip, port)
+          case (None, Some(ip), Some(port)) =>
+            IPLocation(ip, port)
+          case (_, ip, port) =>
+            PartialLocation(ip, port)
+        }
+      }
+
+    def writes(location: Location): JsValue = {
+      location match {
+        case ServiceLocation(hostname, ip, port) =>
+          Json.obj("hostname" -> hostname, "ip" -> ip, "port" -> port)
+        case IPLocation(ip, port) =>
+          Json.obj("ip" -> ip, "port" -> port)
+        case PartialLocation(ip, port) =>
+          Json.obj("ip" -> ip, "port" -> port)
+      }
+    }
+  }
+
   implicit val MonTaskFormat = Json.format[PersistentState]
   implicit val ClusterSecretsFormat = Json.format[ClusterSecrets]
 

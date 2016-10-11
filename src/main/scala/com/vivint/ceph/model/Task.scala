@@ -11,15 +11,18 @@ object TaskState extends lib.Enum {
     val id: Int
   }
 
-  case object TaskStarting extends EnumVal { val id = 0; val name = "TASK_STARTING" }
-  case object TaskRunning  extends EnumVal { val id = 1; val name = "TASK_RUNNING" }
-  case object TaskFinished extends EnumVal { val id = 2; val name = "TASK_FINISHED" }
-  case object TaskFailed   extends EnumVal { val id = 3; val name = "TASK_FAILED" }
-  case object TaskKilled   extends EnumVal { val id = 4; val name = "TASK_KILLED" }
-  case object TaskLost     extends EnumVal { val id = 5; val name = "TASK_LOST" }
-  case object TaskStaging  extends EnumVal { val id = 6; val name = "TASK_STAGING" }
-  case object TaskError    extends EnumVal { val id = 7; val name = "TASK_ERROR" }
-  case object TaskKilling  extends EnumVal { val id = 8; val name = "TASK_KILLING" }
+  sealed trait Active extends EnumVal
+  sealed trait Terminal extends EnumVal
+
+  case object TaskStarting extends Active   { val id = 0; val name = "TASK_STARTING" }
+  case object TaskStaging  extends Active   { val id = 6; val name = "TASK_STAGING" }
+  case object TaskRunning  extends Active   { val id = 1; val name = "TASK_RUNNING" }
+  case object TaskKilling  extends Active   { val id = 8; val name = "TASK_KILLING" }
+  case object TaskFinished extends Terminal { val id = 2; val name = "TASK_FINISHED" }
+  case object TaskFailed   extends Terminal { val id = 3; val name = "TASK_FAILED" }
+  case object TaskKilled   extends Terminal { val id = 4; val name = "TASK_Ktate.LLED" }
+  case object TaskError    extends Terminal { val id = 7; val name = "TASK_ERROR" }
+  case object TaskLost     extends EnumVal  { val id = 5; val name = "TASK_LOST" }
 
   def values = Vector(TaskError, TaskFailed, TaskFinished, TaskKilled, TaskKilling, TaskLost, TaskRunning, TaskStaging,
     TaskStarting)
@@ -51,6 +54,7 @@ case class Task(
   pState: PersistentState,
   behavior: Behavior,
   persistentVersion: Long = 0,
+  purged: Boolean = false,
   wantingNewOffer: Boolean = false,
   heldOffer: Option[(PendingOffer, Option[ResourceMatcher.ResourceMatch])] = None,
   taskStatus: Option[TaskStatus] = None
@@ -67,12 +71,34 @@ case class Task(
   def peers(p: Iterable[Task]): Iterable[Task] =
     p.filter { peer => (peer.role == this.role) && peer.id != this.id }
 
-  lazy val goal = pState.goal
-  lazy val lastLaunched = pState.lastLaunched
-  lazy val slaveId = pState.slaveId
+  def reservationConfirmed = pState.reservationConfirmed
+  def goal = pState.goal
+  def lastLaunched = pState.lastLaunched
+  def slaveId = pState.slaveId
 
   def withGoal(goal: Option[RunState.EnumVal]): Task =
     copy(pState = pState.copy(goal = goal))
+
+  /** Given a mesos status, reads the task status, infers and stores IP address if it is avail
+    */
+  def withTaskStatus(taskStatus: Protos.TaskStatus): Task = {
+    import scala.collection.JavaConversions._
+    val inferredIp = taskStatus.getContainerStatus.getNetworkInfosList.
+      toStream.
+      flatMap { _.getIpAddressesList.toStream }.
+      map { _.getIpAddress }.
+      headOption
+
+    val nextPState = (pState.location.ipOpt, inferredIp) match {
+      case (None, Some(ip)) => pState.copy(location = pState.location.withIP(ip))
+      case _ => pState
+    }
+
+    copy(
+      taskStatus = Some(TaskStatus.fromMesos(taskStatus)),
+      pState = nextPState)
+  }
+
 
   /** If task is running
     */

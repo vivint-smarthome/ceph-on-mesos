@@ -30,27 +30,36 @@ class TasksState(log: LoggingAdapter) {
     if (prior.contains(update))
       return update
 
-    val nextTask =
-      if (_tasks.get(update.taskId).map(_.pState) != Some(update.pState)) {
-        val nextVersion = update.version + 1
-        update.copy(
-          version = nextVersion)
-      } else {
-        update
-      }
+    if (update.purged) {
+      log.debug("task purged: {}", model.PlayJsonFormats.TaskWriter.writes(update))
+      _tasks = _tasks - update.taskId
+      callSubscribers((prior, None))
+      update
+    } else {
+      val nextTask =
+        if (_tasks.get(update.taskId).map(_.pState) != Some(update.pState)) {
+          val nextVersion = update.version + 1
+          update.copy(
+            version = nextVersion)
+        } else {
+          update
+        }
+      if (log.isDebugEnabled)
+        log.debug("task updated: {}", model.PlayJsonFormats.TaskWriter.writes(nextTask))
 
-    if (log.isDebugEnabled)
-      log.debug("task updated: {}", model.PlayJsonFormats.TaskWriter.writes(nextTask))
+      _tasks = _tasks.updated(update.taskId, nextTask)
+      callSubscribers((prior, Some(nextTask)))
 
-    val event = (prior, Some(nextTask))
-    _tasks = _tasks.updated(update.taskId, nextTask)
+      nextTask
+    }
+  }
+
+
+  private def callSubscribers(event: (Option[Task], Option[Task])): Unit =
     subscribers.foreach { subscriber =>
       if(subscriber.isDefinedAt(event))
         subscriber(event)
     }
-
-    nextTask
-  }
 
   def updatePersistence(taskId: String, version: Long) = {
     _tasks.get(taskId) foreach { task =>

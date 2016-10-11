@@ -95,10 +95,13 @@ object ProtoHelpers {
     val b = Labels.newBuilder
 
     kvs.foreach { case (key, value) =>
-      b.addLabels(
-        Label.newBuilder.setKey(key).setValue(value))
+      b.addLabels(newLabel(key,value))
     }
     b.build
+  }
+
+  def newLabel(key: String, value: String): Label = {
+    Label.newBuilder.setKey(key).setValue(value).build
   }
 
   def newTaskId(taskId: String): TaskID = {

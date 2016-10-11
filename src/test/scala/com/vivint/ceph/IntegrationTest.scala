@@ -255,7 +255,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       goal = Some(RunState.Running),
       reservationConfirmed = true,
       slaveId = Some("slave-12"),
-      location = Some(monLocation))
+      location = monLocation)
     val monitorTaskTaskId = model.Task.makeTaskId(monitorTask.role, monitorTask.cluster, monitorTask.id)
 
     val module = new TestBindings {

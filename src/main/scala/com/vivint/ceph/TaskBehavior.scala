@@ -1,6 +1,7 @@
 package com.vivint.ceph
 
 import org.apache.mesos.Protos
+import com.vivint.ceph.model.{ Location, PartialLocation, TaskState }
 import com.vivint.ceph.model.{ TaskRole, RunState, CephConfig, Task, ServiceLocation }
 import TaskFSM._
 import Behavior._
@@ -20,6 +21,11 @@ class TaskBehavior(
   frameworkId: () => Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
+
+  private def getMonLocations(fullState: Map[String, Task]): Set[ServiceLocation] =
+    fullState.values.
+      filter(_.role == TaskRole.Monitor).
+      flatMap{_.pState.serviceLocation}(breakOut)
 
   val resolver = inject[String => String]('ipResolver)
   val offerOperations = inject[OfferOperations]
@@ -201,27 +207,23 @@ class TaskBehavior(
       fullState.values.filter(_.role == TaskRole.Monitor).toList
 
     override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      if(! reservationConfirmed(state))
+      if(! state.reservationConfirmed)
         throw new IllegalStateException("Can't go to running state without a confirmed reservation")
       nextRunAction(state, fullState)
     }
 
     def nextRunAction(state: Task, fullState: Map[String, Task]): Directive = {
-      (state.lastLaunched, state.runningState, state.goal) match {
-        case (_, _, None) =>
+      (state.runningState, state.goal) match {
+        case (_, None) =>
           Transition(WaitForGoal( { (_,_) => Running }))
 
-        case (_, Some(running), Some(goal)) if running != goal =>
+        case (Some(running), Some(goal)) if running != goal =>
           // current running state does not match goal
           Transition(Killing(70.seconds, { (_, _) => Running }))
 
-        case (_, _, Some(_)) =>
+        case (_, Some(_)) =>
           // if we already have a goal then proceed
           Stay
-        case (Some(launched), _, None) =>
-          val jsonRepresentation = model.PlayJsonFormats.TaskWriter.writes(state)
-          throw new IllegalStateException(
-            s"Can't have launched something without a goal: launched = ${launched}; state = ${jsonRepresentation}")
       }
     }
 
@@ -240,18 +242,14 @@ class TaskBehavior(
             OfferResponse(pendingOffer, Nil)
           else {
             lazy val peers = state.peers(fullState.values)
-            lazy val monLocations: Set[ServiceLocation] = fullState.values.
-              filter(_.role == TaskRole.Monitor).
-              flatMap{_.pState.location}(breakOut)
+            lazy val monLocations = getMonLocations(fullState)
             lazy val taskLocation = deriveLocation(pendingOffer.offer)
 
             (state.role, state.pState.goal) match {
               case (TaskRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                println(s"peers = ${peers.map(_.pState.goal)}")
-
                 Persist(
                   state.pState.copy(
-                    location = Some(taskLocation),
+                    location = taskLocation,
                     lastLaunched = Some(desiredState))).
                   andAlso(
                     OfferResponse(
@@ -267,7 +265,7 @@ class TaskBehavior(
               case (TaskRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
                 Persist(
                   state.pState.copy(
-                    location = Some(taskLocation),
+                    location = taskLocation,
                     lastLaunched = Some(desiredState))).
                   andAlso(
                     OfferResponse(
@@ -281,7 +279,6 @@ class TaskBehavior(
 
               case _ =>
                 ???
-                // Hold(pendingOffer, None)
             }
           }
         case TaskUpdated(_) =>
@@ -300,16 +297,15 @@ class TaskBehavior(
       headOption.
       getOrElse(default)
 
-  private def inferPort(resources: Iterable[Protos.Resource], default: Int = 6789): Int =
+  private def inferPort(resources: Iterable[Protos.Resource]): Option[Int] =
     resources.
       toStream.
       filter(_.getName == PORTS).
       flatMap(_.ranges).
       headOption.
-      map(_.min.toInt).
-      getOrElse(default)
+      map(_.min.toInt)
 
-  private def deriveLocation(offer: Protos.Offer): ServiceLocation = {
+  private def deriveLocation(offer: Protos.Offer, defaultPort: Int = 6789): ServiceLocation = {
     val ip = resolver(offer.getHostname)
 
     val port = inferPort(offer.resources)
@@ -317,7 +313,7 @@ class TaskBehavior(
     ServiceLocation(
       offer.hostname.get,
       ip,
-      port)
+      port.getOrElse(defaultPort))
   }
 
   private def launchMonCommand(
@@ -343,7 +339,7 @@ class TaskBehavior(
       taskId = task.taskId,
       role = task.role,
       offer = offer,
-      taskLocation = taskLocation,
+      location = taskLocation,
       templatesTgz = templatesTgz,
       command =
         runState match {
@@ -388,7 +384,7 @@ class TaskBehavior(
       taskId = task.taskId,
       role = task.role,
       offer = offer,
-      taskLocation = taskLocation,
+      location = taskLocation,
       templatesTgz = templatesTgz,
       command =
         runState match {
@@ -427,7 +423,7 @@ class TaskBehavior(
   }
 
   private def launchCephCommand(taskId: String, role: TaskRole.EnumVal, command: String, offer: Protos.Offer,
-    taskLocation: ServiceLocation, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
+    location: Location, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
@@ -455,13 +451,34 @@ class TaskBehavior(
         ++
         vars) : _*)
 
+
+    val discovery = Protos.DiscoveryInfo.newBuilder.
+      setVisibility(Protos.DiscoveryInfo.Visibility.FRAMEWORK).
+      setName(role.toString)
+
+    location.portOpt.foreach { port =>
+      discovery.
+        setPorts(Protos.Ports.newBuilder.addPorts(
+          Protos.Port.newBuilder.
+            setName(role.toString).
+            setNumber(port).
+            setProtocol("TCP")))
+    }
+
+    val labels = Protos.Labels.newBuilder
+    labels.addLabels(newLabel(Constants.FrameworkIdLabel, frameworkId().getValue))
+    location.hostnameOpt.foreach { hostname =>
+      labels.addLabels(newLabel(Constants.HostnameLabel, hostname))
+    }
+    location.portOpt.foreach { port =>
+      labels.addLabels(newLabel(Constants.PortLabel, port.toString))
+    }
+
     val taskInfo = Protos.TaskInfo.newBuilder.
       setTaskId(newTaskId(taskId)).
-      setLabels(newLabels(
-        Constants.FrameworkIdLabel -> frameworkId().getValue,
-        Constants.HostnameLabel -> taskLocation.hostname,
-        Constants.PortLabel -> taskLocation.port.toString)).
+      setLabels(labels).
       setName(s"ceph-${role}").
+      setDiscovery(discovery).
       setContainer(container).
       setSlaveId(offer.getSlaveId).
       addAllResources(offer.getResourcesList).

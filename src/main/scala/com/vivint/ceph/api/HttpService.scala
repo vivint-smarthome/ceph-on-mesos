@@ -57,7 +57,7 @@ class HttpService(implicit inj: Injector) {
       getTasks).map {
       case (secrets, cfg, tasks) =>
         val monitors: Set[ServiceLocation] =
-          tasks.values.filter(_.role == TaskRole.Monitor).flatMap(_.pState.location)(breakOut)
+          tasks.values.filter(_.role == TaskRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
         makeTgz(
           "etc/ceph/ceph.conf" -> configTemplates.cephConf(secrets, monitors, cfg.settings, None),
           "etc/ceph/ceph.client.admin.keyring" -> configTemplates.cephClientAdminRing(secrets),

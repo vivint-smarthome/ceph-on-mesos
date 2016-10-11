@@ -148,12 +148,13 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
       log.info("InitialState: persistentTaskStates count = {}, fId = {}", persistentTaskStates.length, fId)
         cephConfig = _cephConfig
-        frameworkId = fId
-      val newTasks = persistentTaskStates.map { p =>
-        taskFSM.initializeBehavior(
-          Task.fromState(p, defaultBehavior = taskFSM.defaultBehavior))
-      }
-      newTasks.foreach(tasks.updateTask)
+      frameworkId = fId
+
+      persistentTaskStates.
+        map { p =>
+          Task.fromState(p, defaultBehavior = taskFSM.defaultBehavior)
+        }.
+        foreach(taskFSM.initialize)
 
       unstashAll()
       startReconciliation()
@@ -204,7 +205,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         if (taskIdsForReconciliation.isEmpty) {
           reconciledResult.foreach { case (task, taskStatus) =>
-            tasks.updateTask(task.copy(taskStatus = Some(TaskStatus.fromMesos(taskStatus))))
+            tasks.updateTask(task.withTaskStatus(taskStatus))
           }
 
           reconciliationTimer.cancel()
@@ -358,8 +359,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           val newCount = Math.max(0, size - roleTasks.size)
           Stream.
             continually { Task.forRole(role, taskFSM.defaultBehavior) }.
-            take(newCount).
-            map(taskFSM.initializeBehavior)
+            take(newCount)
       }.toList
 
     if (log.isInfoEnabled) {
@@ -367,7 +367,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       log.info("added {} as a result of config update", newDesc)
     }
 
-    newTasks.foreach(tasks.updateTask)
+    newTasks.foreach(taskFSM.initialize)
     offerMatchers = offerMatchFactory(cephConfig)
 
     if (tasks.values.exists(_.wantingNewOffer)) {
