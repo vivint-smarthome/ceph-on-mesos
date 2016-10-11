@@ -15,27 +15,20 @@ case class JobStore(kvStore: KVStore) {
 
   import PlayJsonFormats._
 
-  val taskPathRegex = s"^${JobRole.values.mkString("|")}:".r
-  private val parsingFunction: PartialFunction[String, (String, (JsValue => PersistentState))] = {
-    case path if taskPathRegex.findFirstMatchIn(path).nonEmpty =>
-      (path, _.as[PersistentState])
-  }
-
   def getTasks: Future[Seq[PersistentState]] = async {
     val paths = await(kvStore.children(tasksPath)).
-      collect(parsingFunction).
-      map { case (path, parser) =>
-        (tasksPath + "/" + path, parser)
+      map { path =>
+        (tasksPath + "/" + path)
       }
 
-    await(kvStore.getAll(paths.map(_._1))).
-      zip(paths.map(_._2)).
-      map { case (optBytes, parser) =>
-        optBytes.map { bytes =>
-          (parser(Json.parse(bytes)))
-        }
-      }.
-      flatten
+    await(kvStore.getAll(paths)).
+      zip(paths).
+      map {
+        case (Some(bytes), _) =>
+          (Json.parse(bytes).as[PersistentState])
+        case (None, path) =>
+          throw new RuntimeException(s"Error: empty task state at path ${path}")
+      }
   }
 
   def save(task: PersistentState): Future[Unit] = {
