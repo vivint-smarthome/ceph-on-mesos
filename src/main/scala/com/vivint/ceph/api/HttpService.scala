@@ -13,7 +13,7 @@ import akka.stream.ActorMaterializer
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.views.ConfigTemplates
 import scala.collection.breakOut
-import com.vivint.ceph.model.{ RunState, ServiceLocation, TaskRole }
+import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole }
 import java.util.UUID
 import scaldi.Injector
 import scaldi.Injectable._
@@ -44,8 +44,8 @@ class HttpService(implicit inj: Injector) {
         complete((400, s"Error parsing: ${ex.getMessage}"))
     }
 
-  def getTasks: Future[Map[String, model.Task]] =
-    (taskActor ? TaskActor.GetTasks).mapTo[Map[String, model.Task]]
+  def getTasks: Future[Map[UUID, model.Job]] =
+    (taskActor ? TaskActor.GetTasks).mapTo[Map[UUID, model.Job]]
 
   def findTaskByUUID(id: UUID) =
     getTasks.map { _.values.find(_.id == id) }
@@ -57,7 +57,7 @@ class HttpService(implicit inj: Injector) {
       getTasks).map {
       case (secrets, cfg, tasks) =>
         val monitors: Set[ServiceLocation] =
-          tasks.values.filter(_.role == TaskRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
+          tasks.values.filter(_.role == JobRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
         makeTgz(
           "etc/ceph/ceph.conf" -> configTemplates.cephConf(secrets, monitors, cfg.settings, None),
           "etc/ceph/ceph.client.admin.keyring" -> configTemplates.cephClientAdminRing(secrets),
@@ -79,7 +79,7 @@ class HttpService(implicit inj: Injector) {
       (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
         onSuccess(findTaskByUUID(id)) {
           case Some(task) =>
-            taskActor ! TaskActor.UpdateGoal(task.taskId, runState)
+            taskActor ! TaskActor.UpdateGoal(task.id, runState)
             complete(s"Task ID ${task.taskId} state change submitted: ${task.goal} -> ${Some(runState)}")
           case None =>
             complete((400, s"Couldn't find task with UUID ${id}."))

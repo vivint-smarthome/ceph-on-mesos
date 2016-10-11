@@ -21,7 +21,7 @@ import org.scalatest.exceptions.TestFailedException
 import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.lib.TgzHelper
-import com.vivint.ceph.model.{ PersistentState, TaskRole, Task, RunState, ServiceLocation }
+import com.vivint.ceph.model.{ PersistentState, JobRole, Job, RunState, ServiceLocation }
 import com.vivint.ceph.views.ConfigTemplates
 import scala.annotation.tailrec
 import scala.collection.breakOut
@@ -107,12 +107,14 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     }
   }
 
-  @tailrec final def receiveIgnoring(probe: TestProbe, d: FiniteDuration, ignore: PartialFunction[Any, Boolean]): Any = {
+  @tailrec final def receiveIgnoring(probe: TestProbe, d: FiniteDuration, ignore: PartialFunction[Any, Boolean]):
+      Option[Any] = {
     val received = probe.receiveOne(d)
-      if (ignore.isDefinedAt(received) && ignore(received))
-        receiveIgnoring(probe, d, ignore)
-      else
-        received
+
+    if (ignore.isDefinedAt(received) && ignore(received))
+      receiveIgnoring(probe, d, ignore)
+    else
+      Option(received)
   }
 
   @tailrec final def gatherResponses(testProbe: TestProbe, offers: List[Protos.Offer],
@@ -124,7 +126,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     else {
       val received = receiveIgnoring(testProbe, 5.seconds, ignore)
       val (newResults, newOffers) = inside(received) {
-        case msg: FrameworkActor.OfferResponseCommand =>
+        case Some(msg: FrameworkActor.OfferResponseCommand) =>
           val offer = offers.find(_.getId == msg.offerId).get
           ( results.updated(offer, msg),
             offers.filterNot(_ == offer))
@@ -138,15 +140,17 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     gatherResponses(testProbe, List(offer), ignore = ignore)(offer)
   }
 
-  def handleGetCreateReserve: PartialFunction[Any, (Protos.Offer.Operation.Reserve, Protos.Offer.Operation.Create)] = {
-    case offerResponse: FrameworkActor.AcceptOffer =>
+  def handleGetCreateReserve:
+      PartialFunction[Option[Any], (Protos.Offer.Operation.Reserve, Protos.Offer.Operation.Create)] = {
+    case Some(offerResponse: FrameworkActor.AcceptOffer) =>
       val List(reserve, create) = offerResponse.operations
       reserve.hasReserve shouldBe (true)
       create.hasCreate shouldBe (true)
       (reserve.getReserve, create.getCreate)
   }
 
-  def handleReservationResponse(offer: Protos.Offer): PartialFunction[Any, Protos.Offer] = handleGetCreateReserve.andThen {
+  def handleReservationResponse(offer: Protos.Offer):
+      PartialFunction[Option[Any], Protos.Offer] = handleGetCreateReserve.andThen {
     case (reserve, create) =>
       MesosTestHelper.mergeReservation(offer, reserve, create)
   }
@@ -189,7 +193,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     val responses = gatherResponses(probe, List(offer, sameOffer))
 
-    val reservedOffer = inside(responses(offer))(handleReservationResponse(offer))
+    val reservedOffer = inside(responses.get(offer))(handleReservationResponse(offer))
 
     inside(responses(sameOffer)) {
       case offerResponse: FrameworkActor.DeclineOffer =>
@@ -202,8 +206,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
 
-    val taskId = inside(probe.receiveOne(5.seconds)) {
-      case offerResponse: FrameworkActor.AcceptOffer =>
+    val taskId = inside(Option(probe.receiveOne(5.seconds))) {
+      case Some(offerResponse: FrameworkActor.AcceptOffer) =>
         offerResponse.offerId shouldBe reservedOffer.getId
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
         val List(task) = offerResponse.operations(0).getLaunch.tasks
@@ -228,12 +232,12 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     val altSlaveOffer = MesosTestHelper.makeBasicOffer(slaveId = 1).build
     taskActor ! FrameworkActor.ResourceOffers(List(altSlaveOffer))
 
-    val altReservedOffer = inside(probe.receiveOne(5.seconds))(handleReservationResponse(altSlaveOffer))
+    val altReservedOffer = inside(Option(probe.receiveOne(5.seconds)))(handleReservationResponse(altSlaveOffer))
 
     taskActor ! FrameworkActor.ResourceOffers(List(altReservedOffer))
 
-    inside(gatherResponse(probe, altReservedOffer, ignoreRevive)) {
-      case offerResponse: FrameworkActor.AcceptOffer =>
+    inside(Option(gatherResponse(probe, altReservedOffer, ignoreRevive))) {
+      case Some(offerResponse: FrameworkActor.AcceptOffer) =>
         offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
         val List(task) = offerResponse.operations(0).getLaunch.tasks
         val shCommand = task.getCommand.getValue
@@ -247,21 +251,23 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
   trait OneMonitorRunning {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
     val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
+    val cluster = "ceph"
+    val monitorTaskId = model.Job.makeTaskId(JobRole.Monitor, cluster)
     val monitorTask = PersistentState(
       id = UUID.randomUUID(),
       cluster = "ceph",
-      role = TaskRole.Monitor,
+      role = JobRole.Monitor,
       lastLaunched = Some(RunState.Running),
       goal = Some(RunState.Running),
       reservationConfirmed = true,
       slaveId = Some("slave-12"),
+      taskId = Some(monitorTaskId),
       location = monLocation)
-    val monitorTaskTaskId = model.Task.makeTaskId(monitorTask.role, monitorTask.cluster, monitorTask.id)
 
     val module = new TestBindings {
       bind [KVStore] to {
         val store = new kvstore.MemStore
-        val taskStore = new TaskStore(store)
+        val taskStore = new JobStore(store)
         taskStore.save(monitorTask)
         store
       }
@@ -282,8 +288,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     // Wait for configuration update
     val config = await(cephConfUpdates.runWith(Sink.head))
 
-    inside(probe.receiveOne(5.seconds)) {
-      case r: FrameworkActor.Reconcile =>
+    inside(Option(probe.receiveOne(5.seconds))) {
+      case Some(r: FrameworkActor.Reconcile) =>
         r.tasks.length shouldBe 1
         val taskStatus = r.tasks.head
         taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
@@ -301,7 +307,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           DISK, 1024000.0, disk = Some(MesosTestHelper.mountDisk("/mnt/ssd-1")))).build
       taskActor ! FrameworkActor.ResourceOffers(List(offer))
 
-      val reservedOffer = inside(gatherResponse(probe, offer, ignoreRevive))(handleReservationResponse(offer))
+      val reservedOffer = inside(Option(gatherResponse(probe, offer, ignoreRevive)))(handleReservationResponse(offer))
 
       reservedOffer.resources.filter(_.getName == DISK).head.getScalar.getValue shouldBe 1024000.0
 
@@ -331,19 +337,15 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     new OneMonitorRunning {
       import module.injector
 
-      val taskKilledStatusUpdate = newTaskStatus(monitorTaskTaskId, monitorTask.slaveId.get,
-        state = Protos.TaskState.TASK_KILLED)
-      val taskRunningStatusUpdate = newTaskStatus(monitorTaskTaskId, monitorTask.slaveId.get,
-        state = Protos.TaskState.TASK_RUNNING)
-
-      taskActor ! TaskActor.UpdateGoal(monitorTaskTaskId, model.RunState.Paused)
+      taskActor ! TaskActor.UpdateGoal(monitorTask.id, model.RunState.Paused)
 
       inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
-        case FrameworkActor.KillTask(taskId) =>
-          taskId.getValue shouldBe monitorTaskTaskId
+        case Some(FrameworkActor.KillTask(taskId)) =>
+          taskId.getValue shouldBe monitorTaskId
       }
 
-      taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(monitorTaskId, monitorTask.slaveId.get, state = Protos.TaskState.TASK_KILLED))
 
       val offerOperations = inject[OfferOperations]
       val reservedOffer = MesosTestHelper.makeBasicOffer(
@@ -351,29 +353,32 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         role = "ceph",
         reservationLabels = Some(newLabels(
           Constants.FrameworkIdLabel -> MesosTestHelper.frameworkID.getValue,
-          Constants.TaskIdLabel -> monitorTaskTaskId))).
+          Constants.JobIdLabel -> monitorTask.id.toString))).
         build
 
       taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
 
-      inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
+      val relaunchedTaskId = inside(gatherResponse(probe, reservedOffer, ignoreRevive)) {
         case offerResponse: FrameworkActor.AcceptOffer =>
           offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
           val List(task) = offerResponse.operations(0).getLaunch.tasks
           val shCommand = task.getCommand.getValue
           shCommand.contains("sleep ") shouldBe true
+          task.getTaskId.getValue
       }
 
-      taskActor ! TaskActor.UpdateGoal(monitorTaskTaskId, model.RunState.Running)
+      taskActor ! TaskActor.UpdateGoal(monitorTask.id, model.RunState.Running)
 
-      taskActor ! FrameworkActor.StatusUpdate(taskRunningStatusUpdate)
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(relaunchedTaskId, monitorTask.slaveId.get, state = Protos.TaskState.TASK_RUNNING))
 
       inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
-        case FrameworkActor.KillTask(taskId) =>
-          taskId.getValue shouldBe monitorTaskTaskId
+        case Some(FrameworkActor.KillTask(taskId)) =>
+          taskId.getValue shouldBe relaunchedTaskId
       }
 
-      taskActor ! FrameworkActor.StatusUpdate(taskKilledStatusUpdate)
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(relaunchedTaskId, monitorTask.slaveId.get, state = Protos.TaskState.TASK_KILLED))
 
       taskActor ! FrameworkActor.ResourceOffers(List(reservedOffer))
 
@@ -419,7 +424,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     val responses = gatherResponses(probe, offers, ignore = ignoreRevive)
 
     val List(reservationOffer, reservationOffer2) = responses.map { case (offer, response) =>
-      inside(response)(handleReservationResponse(offer))
+      inside(Option(response))(handleReservationResponse(offer))
     }.toList
 
     taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer, reservationOffer2))
@@ -443,14 +448,14 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     implicit val timeout = Timeout(3.seconds)
 
-    val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetTasks).mapTo[Map[String, Task]]).
+    val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetTasks).mapTo[Map[UUID, Job]]).
       values.
-      partition(_.taskId == launchedTaskId)
+      partition(_.taskId == Some(launchedTaskId))
 
     unlaunchedTask.behavior.name shouldBe ("WaitForGoal")
 
     taskActor ! FrameworkActor.StatusUpdate(
-      newTaskStatus(launchedTask.taskId, launchedTask.slaveId.get, Protos.TaskState.TASK_RUNNING))
+      newTaskStatus(launchedTask.taskId.get, launchedTask.slaveId.get, Protos.TaskState.TASK_RUNNING))
 
     taskActor ! FrameworkActor.ResourceOffers(List(reservationOffer2))
 

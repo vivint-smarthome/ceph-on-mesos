@@ -45,11 +45,12 @@ case class ServiceLocation(hostname: String, ip: String, port: Int) extends Loca
 case class PersistentState(
   id: UUID,
   cluster: String,
-  role: TaskRole.EnumVal,
+  role: JobRole.EnumVal,
   goal: Option[RunState.EnumVal] = None,
   lastLaunched: Option[RunState.EnumVal] = None,
   reservationConfirmed: Boolean = false,
   slaveId: Option[String] = None,
+  taskId: Option[String] = None,
   location: Location = Location.empty) {
 
   def ipLocation: Option[IPLocationLike] = location match {

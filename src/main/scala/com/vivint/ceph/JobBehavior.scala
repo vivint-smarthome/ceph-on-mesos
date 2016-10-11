@@ -1,9 +1,10 @@
 package com.vivint.ceph
 
+import java.util.UUID
 import org.apache.mesos.Protos
 import com.vivint.ceph.model.{ Location, PartialLocation, TaskState }
-import com.vivint.ceph.model.{ TaskRole, RunState, CephConfig, Task, ServiceLocation }
-import TaskFSM._
+import com.vivint.ceph.model.{ JobRole, RunState, CephConfig, Job, ServiceLocation }
+import JobFSM._
 import Behavior._
 import scala.collection.immutable.NumericRange
 import scala.concurrent.duration._
@@ -16,15 +17,15 @@ import ProtoHelpers._
 import java.util.Base64
 import Directives._
 
-class TaskBehavior(
+class JobBehavior(
   secrets: ClusterSecrets,
   frameworkId: () => Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
 
-  private def getMonLocations(fullState: Map[String, Task]): Set[ServiceLocation] =
+  private def getMonLocations(fullState: Map[UUID, Job]): Set[ServiceLocation] =
     fullState.values.
-      filter(_.role == TaskRole.Monitor).
+      filter(_.role == JobRole.Monitor).
       flatMap{_.pState.serviceLocation}(breakOut)
 
   val resolver = inject[String => String]('ipResolver)
@@ -32,7 +33,7 @@ class TaskBehavior(
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
 
-  def decideWhatsNext(state: Task, fullState: Map[String, Task]): Directives.Directive = {
+  def decideWhatsNext(state: Job, fullState: Map[UUID, Job]): Directives.Directive = {
     import Directives._
     state.pState match {
       case pState if state.version != state.persistentVersion =>
@@ -51,26 +52,26 @@ class TaskBehavior(
   }
 
   case object InitializeLogic extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
-      decideWhatsNext(state: Task, fullState: Map[String, Task]): Directive
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
+      decideWhatsNext(state: Job, fullState: Map[UUID, Job]): Directive
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive =
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive =
       throw new IllegalStateException("handleEvent called on InitializeLogic")
   }
 
   case class WaitForSync(nextBehavior: DecideFunction) extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       SetBehaviorTimer("timeout", 30.seconds)
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       event match {
         case Timer("timeout") =>
           nextBehavior(state, fullState)
         case Timer(_) =>
           Stay
-        case TaskUpdated(prior) =>
+        case JobUpdated(prior) =>
           if (state.persistentVersion < state.version)
             Stay
           else
@@ -82,15 +83,15 @@ class TaskBehavior(
   }
 
   case object MatchForReservation extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       WantOffers
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       event match {
         case Timer(_) =>
           Stay
-        case TaskUpdated(_) =>
+        case JobUpdated(_) =>
           Stay
         case MatchedOffer(pendingOffer, matchResult) =>
           val resources = pendingOffer.offer.resources
@@ -105,7 +106,7 @@ class TaskBehavior(
               case Some(result) =>
                 OfferResponse(
                   pendingOffer,
-                  offerOperations.reserveAndCreateVolumes(frameworkId(), state.taskId, result)).
+                  offerOperations.reserveAndCreateVolumes(frameworkId(), state.id, result)).
                   andAlso(
                     Persist(
                       state.pState.copy(slaveId = Some(pendingOffer.slaveId)))).
@@ -119,11 +120,11 @@ class TaskBehavior(
   }
 
   case object WaitForReservation extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       SetBehaviorTimer("timeout", 30.seconds)
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       event match {
         case Timer("timeout") =>
           Transition(MatchForReservation)
@@ -139,22 +140,22 @@ class TaskBehavior(
           } else {
             Hold(pendingOffer, matchResult).withTransition(MatchForReservation)
           }
-        case TaskUpdated(_) =>
+        case JobUpdated(_) =>
           Stay
       }
     }
   }
 
   case class Sleep(duration: FiniteDuration, andThen: DecideFunction) extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       SetBehaviorTimer("wakeup", duration)
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       event match {
         case Timer("wakeup") =>
           andThen(state, fullState)
-        case Timer(_) | TaskUpdated(_) =>
+        case Timer(_) | JobUpdated(_) =>
           Stay
         case MatchedOffer(offer, matchResult) =>
           Hold(offer, matchResult)
@@ -163,25 +164,25 @@ class TaskBehavior(
   }
 
 
-  val holdingOffers: PartialFunction[TaskFSM.Event, Directive] = {
+  val holdingOffers: PartialFunction[JobFSM.Event, Directive] = {
     case MatchedOffer(offer, matchResult) =>
       Hold(offer, matchResult)
   }
 
   case class Killing(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       if (state.runningState.isEmpty)
         throw new IllegalStateException("can't kill a non-running task")
 
       SetBehaviorTimer("timeout", duration).andAlso(KillTask)
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       handleWith(event) {
         holdingOffers orElse {
           case Timer("timeout") =>
             preStart(state, fullState)
-          case TaskUpdated(_) if (state.runningState.isEmpty) =>
+          case JobUpdated(_) if (state.runningState.isEmpty) =>
             Transition(andThen(state, fullState))
         }
       }
@@ -189,10 +190,10 @@ class TaskBehavior(
   }
 
   case class WaitForGoal(andThen: TransitionFunction) extends Behavior {
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       handleWith(event) {
         holdingOffers orElse {
-          case TaskUpdated(_) if (state.goal.nonEmpty) =>
+          case JobUpdated(_) if (state.goal.nonEmpty) =>
             Transition(andThen(state, fullState))
         }
       }
@@ -200,19 +201,19 @@ class TaskBehavior(
   }
 
   case object Running extends Behavior {
-    def reservationConfirmed(state:Task) =
+    def reservationConfirmed(state:Job) =
       state.pState.reservationConfirmed
 
-    def getMonitors(fullState: Map[String, Task]) =
-      fullState.values.filter(_.role == TaskRole.Monitor).toList
+    def getMonitors(fullState: Map[UUID, Job]) =
+      fullState.values.filter(_.role == JobRole.Monitor).toList
 
-    override def preStart(state: Task, fullState: Map[String, Task]): Directive = {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       if(! state.reservationConfirmed)
         throw new IllegalStateException("Can't go to running state without a confirmed reservation")
       nextRunAction(state, fullState)
     }
 
-    def nextRunAction(state: Task, fullState: Map[String, Task]): Directive = {
+    def nextRunAction(state: Job, fullState: Map[UUID, Job]): Directive = {
       (state.runningState, state.goal) match {
         case (_, None) =>
           Transition(WaitForGoal( { (_,_) => Running }))
@@ -227,7 +228,7 @@ class TaskBehavior(
       }
     }
 
-    def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive = {
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
       event match {
         case Timer(_) =>
           Stay
@@ -244,17 +245,21 @@ class TaskBehavior(
             lazy val peers = state.peers(fullState.values)
             lazy val monLocations = getMonLocations(fullState)
             lazy val taskLocation = deriveLocation(pendingOffer.offer)
+            val newTaskId = Job.makeTaskId(state.role, state.cluster)
+            val persistDirective = Persist(
+              state.pState.copy(
+                location = taskLocation,
+                taskId = Some(newTaskId),
+                lastLaunched = state.goal))
 
             (state.role, state.pState.goal) match {
-              case (TaskRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                Persist(
-                  state.pState.copy(
-                    location = taskLocation,
-                    lastLaunched = Some(desiredState))).
+              case (JobRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+                persistDirective.
                   andAlso(
                     OfferResponse(
                       pendingOffer,
                       launchMonCommand(
+                        taskId = newTaskId,
                         isLeader = peers.forall(_.pState.goal.isEmpty),
                         pendingOffer.offer,
                         state,
@@ -262,15 +267,13 @@ class TaskBehavior(
                         desiredState,
                         monLocations = monLocations
                       )))
-              case (TaskRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                Persist(
-                  state.pState.copy(
-                    location = taskLocation,
-                    lastLaunched = Some(desiredState))).
+              case (JobRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
+                persistDirective.
                   andAlso(
                     OfferResponse(
                       pendingOffer,
                       launchOSDCommand(
+                        taskId = newTaskId,
                         pendingOffer.offer,
                         state,
                         taskLocation = taskLocation,
@@ -281,7 +284,7 @@ class TaskBehavior(
                 ???
             }
           }
-        case TaskUpdated(_) =>
+        case JobUpdated(_) =>
           // if the goal has changed then we need to revaluate our next run state
           nextRunAction(state, fullState)
       }
@@ -317,7 +320,7 @@ class TaskBehavior(
   }
 
   private def launchMonCommand(
-    isLeader: Boolean, offer: Protos.Offer, task: Task, taskLocation: ServiceLocation,
+    taskId: String, isLeader: Boolean, offer: Protos.Offer, task: Job, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -336,7 +339,7 @@ class TaskBehavior(
       cephSettings = deploymentConfig().settings)
 
     val taskInfo = launchCephCommand(
-      taskId = task.taskId,
+      taskId = taskId,
       role = task.role,
       offer = offer,
       location = taskLocation,
@@ -363,7 +366,7 @@ class TaskBehavior(
   }
 
   private def launchOSDCommand(
-    offer: Protos.Offer, task: Task, taskLocation: ServiceLocation,
+    taskId: String, offer: Protos.Offer, job: Job, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -381,8 +384,8 @@ class TaskBehavior(
       osdPort = Some(inferPortRange(offer.resources.toList)))
 
     val taskInfo = launchCephCommand(
-      taskId = task.taskId,
-      role = task.role,
+      taskId = taskId,
+      role = job.role,
       offer = offer,
       location = taskLocation,
       templatesTgz = templatesTgz,
@@ -422,7 +425,7 @@ class TaskBehavior(
         newLaunchOperation(Seq(taskInfo.build))))
   }
 
-  private def launchCephCommand(taskId: String, role: TaskRole.EnumVal, command: String, offer: Protos.Offer,
+  private def launchCephCommand(taskId: String, role: JobRole.EnumVal, command: String, offer: Protos.Offer,
     location: Location, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
     // We launch!
     val container = Protos.ContainerInfo.newBuilder.
@@ -493,5 +496,5 @@ class TaskBehavior(
     taskInfo
   }
 
-  def defaultBehavior(role: TaskRole.EnumVal) = InitializeLogic
+  def defaultBehavior(role: JobRole.EnumVal) = InitializeLogic
 }

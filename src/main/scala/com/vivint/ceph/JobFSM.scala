@@ -2,21 +2,22 @@ package com.vivint.ceph
 
 import akka.actor.Cancellable
 import akka.event.LoggingAdapter
-import com.vivint.ceph.model.{ RunState, ServiceLocation, TaskRole }
+import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole }
+import java.util.UUID
 import org.apache.mesos.Protos
 import mesosphere.mesos.matcher.ResourceMatcher
-import com.vivint.ceph.model.{PersistentState,Task}
-import TaskFSM._
+import com.vivint.ceph.model.{PersistentState,Job}
+import JobFSM._
 import scala.concurrent.duration._
 import scala.collection.immutable.Iterable
 
-object TaskFSM {
+object JobFSM {
   sealed trait Event
   /**
     * external event caused the task state to change
     */
-  case class TaskUpdated(prior: Task) extends Event {
-    def taskStatusChanged(current: Task): Boolean =
+  case class JobUpdated(prior: Job) extends Event {
+    def taskStatusChanged(current: Job): Boolean =
       prior.taskStatus != current.taskStatus
   }
   case class MatchedOffer(offer: PendingOffer, matchResult: Option[ResourceMatcher.ResourceMatch]) extends Event
@@ -24,143 +25,142 @@ object TaskFSM {
 
 }
 
-class TaskFSM(tasks: TasksState, log: LoggingAdapter, behaviorSet: BehaviorSet,
-  setTimer: (String, String, FiniteDuration) => Cancellable,
+class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
+  setTimer: (UUID, String, FiniteDuration) => Cancellable,
   revive: () => Unit,
   killTask: (String => Unit)
 ) {
   // TODO - for each task
-  type TaskId = String
+  type JobId = UUID
   type TimerName = String
   import scala.collection.mutable
-  private val taskTimers = mutable.Map.empty[TaskId, mutable.Map[TimerName, Cancellable]].
+  private val jobTimers = mutable.Map.empty[JobId, mutable.Map[TimerName, Cancellable]].
     withDefaultValue(mutable.Map.empty)
 
-  tasks.addSubscriber {
+  jobs.addSubscriber {
     case (Some(before), Some(after)) =>
-      handleEvent(after, TaskFSM.TaskUpdated(before))
+      handleEvent(after, JobFSM.JobUpdated(before))
   }
 
-  private def setBehaviorTimer(task: Task, timerName: TimerName, duration: FiniteDuration): Unit = {
-    val timers = taskTimers(task.taskId)
-    timers(timerName) = setTimer(task.taskId, timerName, duration)
+  private def setBehaviorTimer(job: Job, timerName: TimerName, duration: FiniteDuration): Unit = {
+    val timers = jobTimers(job.id)
+    timers(timerName) = setTimer(job.id, timerName, duration)
   }
 
-  private def clearTimers(task: Task): Unit =
-    taskTimers.
-      remove(task.taskId).
+  private def clearTimers(job: Job): Unit =
+    jobTimers.
+      remove(job.id).
       getOrElse(mutable.Map.empty).
       foreach { case (_, cancellable) =>
         cancellable.cancel()
       }
 
-  def onTimer(taskId: TaskId, timerName: TimerName): Unit = {
+  def onTimer(jobId: JobId, timerName: TimerName): Unit = {
     for {
-      cancellable <- taskTimers(taskId).remove(timerName)
-      task <- tasks.get(taskId)
+      cancellable <- jobTimers(jobId).remove(timerName)
+      job <- jobs.get(jobId)
     } {
       cancellable.cancel() // just in case it was manually invoked?
-      log.debug("Timer {} for taskId {} fired", timerName, taskId)
-      handleEvent(task, TaskFSM.Timer(timerName))
+      log.debug("Timer {} for jobId {} fired", timerName, jobId)
+      handleEvent(job, JobFSM.Timer(timerName))
     }
   }
 
-  private def processEvents(task: Task, events: List[TaskFSM.Event]): Task = events match {
+  private def processEvents(job: Job, events: List[JobFSM.Event]): Job = events match {
     case event :: rest =>
-      log.debug("{} - sending event {}", task.taskId, event.getClass.getName)
+      log.debug("{} - sending event {}", job.id, event.getClass.getName)
 
       processEvents(
         processDirective(
-          task,
-          task.behavior.submit(event, task, tasks.all)),
+          job,
+          job.behavior.submit(event, job, jobs.all)),
         rest)
     case Nil =>
-      task
+      job
   }
 
-  private def processHeldEvents(task: Task): Task = {
-    task.heldOffer match {
+  private def processHeldEvents(job: Job): Job = {
+    job.heldOffer match {
       case Some((offer, resourceMatch)) =>
         processEvents(
-          task.copy(heldOffer = None),
-          TaskFSM.MatchedOffer(offer, resourceMatch) :: Nil)
+          job.copy(heldOffer = None),
+          JobFSM.MatchedOffer(offer, resourceMatch) :: Nil)
       case None =>
-        task
+        job
     }
   }
 
-  private def processAction(task: Task, action: Directives.Action): Task = {
-    log.debug("{} - processing directive response action {}", task.taskId, action.getClass.getName)
+  private def processAction(job: Job, action: Directives.Action): Job = {
+    log.debug("{} - processing directive response action {}", job.id, action.getClass.getName)
     action match {
       case Directives.Hold(offer, resourceMatch) =>
         // Decline existing held offer
-        task.heldOffer.foreach {
+        job.heldOffer.foreach {
           case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
         }
-        task.copy(heldOffer = Some((offer, resourceMatch)))
+        job.copy(heldOffer = Some((offer, resourceMatch)))
       case Directives.Persist(data) =>
-        task.copy(pState = data)
+        job.copy(pState = data)
       case Directives.SetBehaviorTimer(name, duration: FiniteDuration) =>
-        setBehaviorTimer(task, name, duration)
-        task
+        setBehaviorTimer(job, name, duration)
+        job
       case Directives.Revive =>
         revive()
-        task
+        job
       case Directives.WantOffers =>
-        if (task.heldOffer.isEmpty) {
+        if (job.heldOffer.isEmpty) {
           revive()
-          task.copy(wantingNewOffer = true)
+          job.copy(wantingNewOffer = true)
         } else {
-          task
+          job
         }
       case Directives.KillTask =>
-        killTask(task.taskId)
-        task
+        job.taskId.foreach(killTask)
+        job
       case Directives.OfferResponse(pendingOffer, operations) =>
         pendingOffer.resultingOperationsPromise.success(operations.toList)
-        task
+        job
     }
   }
 
-  final def handleEvent(task: Task, event: TaskFSM.Event): Unit = {
-    tasks.updateTask(
-      processEvents(task, List(event)))
+  final def handleEvent(job: Job, event: JobFSM.Event): Unit = {
+    jobs.updateJob(
+      processEvents(job, List(event)))
   }
 
-  final def initialize(task: Task): Unit = {
-    tasks.updateTask(
-      initializeBehavior(task))
+  final def initialize(job: Job): Unit = {
+    jobs.updateJob(
+      initializeBehavior(job))
   }
 
-  private final def processDirective(task: Task, directive: Directives.Directive): Task = {
-    val taskAfterAction = directive.action.foldLeft(task)(processAction)
+  private final def processDirective(job: Job, directive: Directives.Directive): Job = {
+    val jobAfterAction = directive.action.foldLeft(job)(processAction)
 
     directive.transition match {
       case Some(nextBehavior) =>
-        clearTimers(task)
-        log.info("task {}: Transition {} -> {}", task.taskId, task.behavior.name, nextBehavior.name)
+        clearTimers(job)
+        log.info("job {}: Transition {} -> {}", job.id, job.behavior.name, nextBehavior.name)
         processHeldEvents(
-          initializeBehavior(taskAfterAction.copy(behavior = nextBehavior)))
+          initializeBehavior(jobAfterAction.copy(behavior = nextBehavior)))
 
       case None =>
-        taskAfterAction
+        jobAfterAction
     }
   }
 
-  private final def initializeBehavior(task: Task): Task = {
-    log.info("task {}: Initializing behavior {}", task.taskId, task.behavior.name)
+  private final def initializeBehavior(job: Job): Job = {
+    log.info("job {}: Initializing behavior {}", job.id, job.behavior.name)
     val maybeRemoveHeldOffer =
-      if (task.heldOffer.map(_._1.resultingOperationsPromise.isCompleted).contains(true))
-        task.copy(heldOffer = None)
+      if (job.heldOffer.map(_._1.resultingOperationsPromise.isCompleted).contains(true))
+        job.copy(heldOffer = None)
       else
-        task
+        job
     processDirective(maybeRemoveHeldOffer,
-      task.behavior.preStart(maybeRemoveHeldOffer, tasks.all))
+      job.behavior.preStart(maybeRemoveHeldOffer, jobs.all))
   }
 
-  def defaultBehavior(role: TaskRole.EnumVal): Behavior =
+  def defaultBehavior(role: JobRole.EnumVal): Behavior =
     behaviorSet.defaultBehavior(role)
-
 }
 
 object Directives {
@@ -206,23 +206,23 @@ object Directives {
 
 trait Behavior {
   import Directives._
-  def name = getClass.getSimpleName
+  lazy val name = getClass.getSimpleName.replace("$", "")
 
   @deprecated("use preStart", "now")
-  final def initialize(state: Task, fullState: Map[String, Task]): Directive =
+  final def initialize(state: Job, fullState: Map[UUID, Job]): Directive =
     preStart(state, fullState)
 
   @deprecated("use handleEvent", "now")
-  final def submit(event: Event, state: Task, fullState: Map[String, Task]): Directive =
+  final def submit(event: Event, state: Job, fullState: Map[UUID, Job]): Directive =
     handleEvent(event, state, fullState)
 
   /**
     * Method provides an opportunity to set the next step
     */
-  def preStart(state: Task, fullState: Map[String, Task]): Directive = Stay
-  def handleEvent(event: Event, state: Task, fullState: Map[String, Task]): Directive
+  def preStart(state: Job, fullState: Map[UUID, Job]): Directive = Stay
+  def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive
 
-  protected def handleWith(event: Event)(handler: PartialFunction[TaskFSM.Event, Directive]): Directive = {
+  protected def handleWith(event: Event)(handler: PartialFunction[JobFSM.Event, Directive]): Directive = {
     if (handler.isDefinedAt(event))
       handler(event)
     else
@@ -231,10 +231,10 @@ trait Behavior {
 }
 
 object Behavior {
-  type DecideFunction = (Task, Map[String, Task]) => Directives.Directive
-  type TransitionFunction = (Task, Map[String, Task]) => Behavior
+  type DecideFunction = (Job, Map[UUID, Job]) => Directives.Directive
+  type TransitionFunction = (Job, Map[UUID, Job]) => Behavior
 }
 
 trait BehaviorSet {
-  def defaultBehavior(role: model.TaskRole.EnumVal): Behavior
+  def defaultBehavior(role: model.JobRole.EnumVal): Behavior
 }

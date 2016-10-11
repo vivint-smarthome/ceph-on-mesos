@@ -4,6 +4,7 @@ import akka.actor.{ Actor, ActorContext, ActorLogging, ActorRef, Cancellable, FS
 import akka.pattern.pipe
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Flow, Keep, Sink }
+import java.util.UUID
 import java.util.concurrent.TimeoutException
 import lib.FutureHelpers.tSequence
 import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo, DiskSource }
@@ -33,15 +34,15 @@ class OfferOperations(implicit inj: Injector) {
       newOfferOperation(newUnreserveOperation(resources)))
   }
 
-  def volId(taskId: String, containerPath: String): String =
-    taskId + "#" + containerPath
+  def volId(jobId: UUID, containerPath: String): String =
+    jobId + "#" + containerPath
 
   /** Adapated from Marathon code.
     * TODO - put appropriate copyright information
     */
   def createVolumes(
     frameworkId: FrameworkID,
-    taskId: String,
+    jobId: UUID,
     localVolumes: Iterable[(DiskSource, PersistentVolume)]): Offer.Operation = {
     import scala.collection.JavaConverters._
 
@@ -49,7 +50,7 @@ class OfferOperations(implicit inj: Injector) {
       case (source, vol) =>
         val disk = {
           val persistence = Resource.DiskInfo.Persistence.newBuilder().
-            setId(volId(taskId = taskId, containerPath = vol.containerPath)).
+            setId(volId(jobId = jobId, containerPath = vol.containerPath)).
             setPrincipal(config.principal)
 
           val volume = Volume.newBuilder.
@@ -66,7 +67,7 @@ class OfferOperations(implicit inj: Injector) {
         val reservation = Resource.ReservationInfo.newBuilder.
           setLabels(newLabels(
             Constants.FrameworkIdLabel -> frameworkId.getValue,
-            Constants.TaskIdLabel -> taskId)).
+            Constants.JobIdLabel -> jobId.toString)).
           setPrincipal(config.principal)
 
         Resource.newBuilder.
@@ -87,14 +88,14 @@ class OfferOperations(implicit inj: Injector) {
 
   /** Adapated from Marathon code.
     * TODO - put appropriate copyright information */
-  def reserve(frameworkId: FrameworkID, taskId: String, resources: Iterable[Resource]): Offer.Operation = {
+  def reserve(frameworkId: FrameworkID, jobId: UUID, resources: Iterable[Resource]): Offer.Operation = {
     import scala.collection.JavaConverters._
     val reservedResources = resources.map { resource =>
 
       val reservation = Resource.ReservationInfo.newBuilder().
         setLabels(newLabels(
             Constants.FrameworkIdLabel -> frameworkId.getValue,
-            Constants.TaskIdLabel -> taskId)).
+            Constants.JobIdLabel -> jobId.toString)).
         setPrincipal(config.principal)
 
       Resource.newBuilder(resource).
@@ -112,7 +113,7 @@ class OfferOperations(implicit inj: Injector) {
 
   def reserveAndCreateVolumes(
     frameworkId: FrameworkID,
-    taskId: String,
+    jobId: UUID,
     resourceMatch: ResourceMatcher.ResourceMatch): List[Offer.Operation] = {
 
     val localVolumes = resourceMatch.matches.
@@ -128,7 +129,7 @@ class OfferOperations(implicit inj: Injector) {
       distinct
 
     List(
-      reserve(frameworkId, taskId, resourceMatch.resources),
-      createVolumes(frameworkId, taskId, localVolumes))
+      reserve(frameworkId, jobId, resourceMatch.resources),
+      createVolumes(frameworkId, jobId, localVolumes))
   }
 }

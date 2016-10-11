@@ -4,6 +4,7 @@ import akka.actor.{ Actor, ActorLogging, ActorRef, Cancellable, Stash }
 import akka.pattern.pipe
 import akka.stream.{ ActorMaterializer, OverflowStrategy, ThrottleMode }
 import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
+import java.util.UUID
 import lib.FutureHelpers.tSequence
 import mesosphere.mesos.matcher._
 import org.apache.mesos.Protos
@@ -21,8 +22,8 @@ import scaldi.Injector
 object TaskActor {
   sealed trait Command
   case object GetTasks extends Command
-  case class UpdateGoal(taskId: String, goal: RunState.EnumVal) extends Command
-  case class TaskTimer(taskId: String, timerName: String)
+  case class UpdateGoal(id: UUID, goal: RunState.EnumVal) extends Command
+  case class JobTimer(id: UUID, timerName: String)
 
   val log = LoggerFactory.getLogger(getClass)
 }
@@ -30,7 +31,7 @@ object TaskActor {
 class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging with Stash {
   import TaskActor._
   case class ConfigUpdate(deploymentConfig: Option[CephConfig])
-  case class PersistSuccess(taskId: String, version: Long)
+  case class PersistSuccess(id: UUID, version: Long)
   case class InitialState(
     tasks: Seq[PersistentState],
     frameworkId: Protos.FrameworkID,
@@ -38,7 +39,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     config: CephConfig)
 
   val kvStore = CrashingKVStore(inject[KVStore])
-  val taskStore = TaskStore(kvStore)
+  val taskStore = JobStore(kvStore)
   val offerOperations = inject[OfferOperations]
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
   implicit val materializer = ActorMaterializer()
@@ -46,21 +47,21 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   import ProtoHelpers._
 
   var frameworkId : Protos.FrameworkID = _
-  var _taskFSM: TaskFSM = _
-  implicit def taskFSM: TaskFSM =
+  var _taskFSM: JobFSM = _
+  implicit def taskFSM: JobFSM =
     if (_taskFSM == null)
       throw new IllegalStateException("tried to initialize a behavior before taskFSM was initializied")
     else
       _taskFSM
 
-  val tasks = new TasksState(log)
+  val jobs = new JobsState(log)
 
   var cephConfig: CephConfig = _
 
   val config = inject[AppConfiguration]
   val configStore = ConfigStore(kvStore)
   val offerMatchFactory = new MasterOfferMatchFactory
-  var offerMatchers: Map[TaskRole.EnumVal, OfferMatchFactory.OfferMatcher] = Map.empty
+  var offerMatchers: Map[JobRole.EnumVal, OfferMatchFactory.OfferMatcher] = Map.empty
 
   val getFirstConfigUpdate =
     Flow[Option[CephConfig]].
@@ -81,7 +82,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     })).
     run
 
-  val orchestrator = new Orchestrator(tasks)
+  val orchestrator = new Orchestrator(jobs)
   val lock = kvStore.lock(Constants.LockPath)
 
   override def preStart(): Unit = {
@@ -91,11 +92,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     lib.FutureMonitor.monitor(kvStore.crashed, log, "kvStore")
 
     configStore.storeConfigIfNotExist()
-    tasks.addSubscriber {
+    jobs.addSubscriber {
       case (before, Some(after)) if before.map(_.version).getOrElse(0) != after.version =>
         // version changed?
         import context.dispatcher
-        taskStore.save(after.pState).map(_ => PersistSuccess(after.taskId, after.version)) pipeTo self
+        taskStore.save(after.pState).map(_ => PersistSuccess(after.id, after.version)) pipeTo self
     }
 
     log.info("pulling initial state for TaskActor")
@@ -131,17 +132,17 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   def receive = {
     case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
-      val behaviorSet = new TaskBehavior(secrets, { () => frameworkId }, { () => cephConfig })
-      _taskFSM = new TaskFSM(tasks,
+      val behaviorSet = new JobBehavior(secrets, { () => frameworkId }, { () => cephConfig })
+      _taskFSM = new JobFSM(jobs,
         log = log,
         behaviorSet = behaviorSet,
-        setTimer = { (taskId, timerName, duration) =>
+        setTimer = { (jobId, timerName, duration) =>
           import context.dispatcher
           context.system.scheduler.scheduleOnce(duration) {
-            self ! TaskTimer(taskId, timerName)
+            self ! JobTimer(jobId, timerName)
           }},
         revive = { () => throttledRevives.offer(()) },
-        killTask = { (taskId) =>
+        killTask = { (taskId: String) =>
           frameworkActor ! FrameworkActor.KillTask(newTaskId(taskId))
         }
       )
@@ -152,7 +153,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
       persistentTaskStates.
         map { p =>
-          Task.fromState(p, defaultBehavior = taskFSM.defaultBehavior)
+          Job.fromState(p, defaultBehavior = taskFSM.defaultBehavior)
         }.
         foreach(taskFSM.initialize)
 
@@ -167,7 +168,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     case object ReconcileTimeout
 
     var taskIdsForReconciliation: Set[String] =
-      tasks.values.flatMap { _.taskStatus.map(_.taskId) }(breakOut)
+      jobs.values.
+        filter(_.slaveId.nonEmpty).
+        flatMap { _.taskId }(breakOut)
 
     if (taskIdsForReconciliation.isEmpty) {
       log.info("Skipping reconciliation; no known tasks to reconcile")
@@ -177,8 +180,16 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     log.info("Beginning reconciliation")
     val reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
-    var reconciledResult = List.empty[(Task, Protos.TaskStatus)]
-    frameworkActor ! FrameworkActor.Reconcile(tasks.values.flatMap(_.taskStatus).map(_.toMesos)(breakOut))
+    var reconciledResult = List.empty[(Job, Protos.TaskStatus)]
+    frameworkActor ! FrameworkActor.Reconcile(
+      jobs.
+        values.
+        map { j => (j.taskId, j.slaveId) }.
+        collect {
+          case (Some(tid), Some(sid)) =>
+            newTaskStatus(tid, sid, Protos.TaskState.TASK_LOST)
+        }(breakOut))
+
     context.become {
       case ReconcileTimeout =>
         throw new Exception("timeout during reconciliation")
@@ -188,14 +199,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         }
       case FrameworkActor.StatusUpdate(taskStatus) =>
         val taskId = taskStatus.getTaskId.getValue
-        tasks.get(taskId) match {
-          case Some(task) =>
+        jobs.getByTaskId(taskId) match {
+          case Some(job) =>
             if (log.isDebugEnabled)
-              log.debug("received stats update {}", taskStatus)
+              log.debug("received stats update for {}: {}", job.id, taskStatus)
             else
-              log.info("received status update for {}", taskId)
+              log.info("received status update for {}", job.id)
             taskIdsForReconciliation -= taskId
-            reconciledResult = (task, taskStatus) :: reconciledResult
+            reconciledResult = (job, taskStatus) :: reconciledResult
 
           case None =>
             log.info("received status update for unknown task {}; going to try and kill it", taskId)
@@ -205,7 +216,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         if (taskIdsForReconciliation.isEmpty) {
           reconciledResult.foreach { case (task, taskStatus) =>
-            tasks.updateTask(task.withTaskStatus(taskStatus))
+            jobs.updateJob(task.withTaskStatus(taskStatus))
           }
 
           reconciliationTimer.cancel()
@@ -243,7 +254,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       r.reservation.
         flatMap(_.labels).
         map { labels =>
-          (labels.get(Constants.TaskIdLabel), labels.get(Constants.FrameworkIdLabel))
+          (labels.get(Constants.JobIdLabel).map(UUID.fromString), labels.get(Constants.FrameworkIdLabel))
         }.
         getOrElse {
           (None, None)
@@ -254,13 +265,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     trying to grow in resources. That's not a supported use case right now. At the point it is supported, we can do
     mapping / grouping */
     val operations = reservedGroupings.map {
-      case ((Some(taskId), Some(OurFrameworkId())), resources)
-          if tasks.get(taskId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
-        val task = tasks(taskId)
+      case ((Some(jobId), Some(OurFrameworkId())), resources)
+          if jobs.get(jobId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
+        val task = jobs(jobId)
         val pendingOffer = pendingOfferWithDeadline(offer.withResources(resources))
 
-        // TODO - move updateTask to taskFSM
-        taskFSM.handleEvent(task, TaskFSM.MatchedOffer(pendingOffer, None))
+        taskFSM.handleEvent(task, JobFSM.MatchedOffer(pendingOffer, None))
 
         pendingOffer.resultingOperations
 
@@ -268,13 +278,13 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         Future.successful(offerOperations.unreserveOffer(resources))
       case ((None, None), resources) =>
         val matchCandidateOffer = offer.withResources(resources)
-        val matchingTask = tasks.values.
+        val matchingTask = jobs.values.
           toStream.
           filter(_.readyForOffer).
           flatMap { task =>
             val selector = ResourceMatcher.ResourceSelector.any(Set("*", config.role))
             offerMatchers.get(task.role).
-              flatMap { _(matchCandidateOffer, task, tasks.values) }.
+              flatMap { _(matchCandidateOffer, task, jobs.values) }.
               map { (_, task) }
           }.
           headOption
@@ -285,7 +295,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             val pendingOffer = pendingOfferWithDeadline(matchCandidateOffer)
             taskFSM.handleEvent(
               task.copy(wantingNewOffer = false),
-              TaskFSM.MatchedOffer(pendingOffer, Some(matchResult)))
+              JobFSM.MatchedOffer(pendingOffer, Some(matchResult)))
 
             pendingOffer.resultingOperations
           case _ =>
@@ -299,38 +309,38 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def ready: Receive = {
-    case FrameworkActor.StatusUpdate(taskStatus) if tasks contains taskStatus.getTaskId.getValue =>
-        val priorState = tasks(taskStatus.getTaskId.getValue)
-        val nextState = priorState.copy(taskStatus = Some(TaskStatus.fromMesos(taskStatus)))
-        tasks.updateTask(nextState)
+    case FrameworkActor.StatusUpdate(taskStatus) if jobs containsTaskId taskStatus.getTaskId.getValue =>
+      val priorState = jobs.getByTaskId(taskStatus.getTaskId.getValue).get
+      val nextState = priorState.withTaskStatus(taskStatus)
+      jobs.updateJob(nextState)
 
-      case FrameworkActor.ResourceOffers(offers) =>
-        offers.foreach { offer =>
-          log.debug("received offer\n{}", offer)
-          import context.dispatcher
-          handleOffer(offer).
-            map { ops =>
-              log.debug("response for offer {}: {}", offer.getId.getValue, ops.map(_.getType.getValueDescriptor))
-              if (ops.isEmpty)
-                FrameworkActor.DeclineOffer(offer.getId, Some(2.minutes))
-              else
-                FrameworkActor.AcceptOffer(offer.getId, ops.toList)
-            }.
-            pipeTo(frameworkActor)
-        }
+    case FrameworkActor.ResourceOffers(offers) =>
+      offers.foreach { offer =>
+        log.debug("received offer\n{}", offer)
+        import context.dispatcher
+        handleOffer(offer).
+          map { ops =>
+            log.debug("response for offer {}: {}", offer.getId.getValue, ops.map(_.getType.getValueDescriptor))
+            if (ops.isEmpty)
+              FrameworkActor.DeclineOffer(offer.getId, Some(2.minutes))
+            else
+              FrameworkActor.AcceptOffer(offer.getId, ops.toList)
+          }.
+          pipeTo(frameworkActor)
+      }
 
     case cmd: Command =>
       cmd match {
         case GetTasks =>
-          sender ! tasks.all
+          sender ! jobs.all
 
-        case UpdateGoal(taskId, goal) =>
-          tasks.get(taskId) foreach {
+        case UpdateGoal(id, goal) =>
+          jobs.get(id) foreach {
             case task if task.pState.goal.isEmpty =>
-              log.error("Unabled to update run goal for taskId {}; it is not ready", taskId)
+              log.error("Unabled to update run goal for jobId {}; it is not ready", id)
             case task =>
               val nextTask = task.withGoal(Some(goal))
-              tasks.updateTask(nextTask)
+              jobs.updateJob(nextTask)
           }
       }
 
@@ -342,23 +352,23 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       applyConfiguration()
     case ConfigUpdate(None) =>
       log.warning("Ceph config went missing / unparseable. Changes not applied")
-    case TaskTimer(taskId, timerName) =>
-      taskFSM.onTimer(taskId, timerName)
-    case PersistSuccess(taskId, version) =>
-      tasks.updatePersistence(taskId, version)
+    case JobTimer(id, timerName) =>
+      taskFSM.onTimer(id, timerName)
+    case PersistSuccess(id, version) =>
+      jobs.updatePersistence(id, version)
   }
 
   def applyConfiguration(): Unit = {
     val newTasks = List(
-      TaskRole.Monitor -> cephConfig.deployment.mon.count,
-      TaskRole.RGW -> cephConfig.deployment.rgw.count,
-      TaskRole.OSD -> cephConfig.deployment.osd.count).
+      JobRole.Monitor -> cephConfig.deployment.mon.count,
+      JobRole.RGW -> cephConfig.deployment.rgw.count,
+      JobRole.OSD -> cephConfig.deployment.osd.count).
       flatMap {
         case (role, size) =>
-          val roleTasks = tasks.values.filter( _.role == role)
+          val roleTasks = jobs.values.filter( _.role == role)
           val newCount = Math.max(0, size - roleTasks.size)
           Stream.
-            continually { Task.forRole(role, taskFSM.defaultBehavior) }.
+            continually { Job.forRole(role, taskFSM.defaultBehavior) }.
             take(newCount)
       }.toList
 
@@ -370,7 +380,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     newTasks.foreach(taskFSM.initialize)
     offerMatchers = offerMatchFactory(cephConfig)
 
-    if (tasks.values.exists(_.wantingNewOffer)) {
+    if (jobs.values.exists(_.wantingNewOffer)) {
       log.info("matchers were updated. Scheduling revive")
       throttledRevives.offer(())
     }

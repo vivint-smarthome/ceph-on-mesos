@@ -1,48 +1,49 @@
 package com.vivint.ceph
 
-import com.vivint.ceph.model.{ RunState, Task, TaskRole }
+import com.vivint.ceph.model.{ RunState, Job, JobRole }
+import java.util.UUID
 
-class Orchestrator(tasks: TasksState) {
-  class MutableDelegator(private var delegator: TasksState.Subscriber) extends TasksState.Subscriber {
-    def isDefinedAt(x: (Option[Task], Option[Task])): Boolean = delegator.isDefinedAt(x)
-    def apply(v1: (Option[Task], Option[Task])) = delegator.apply(v1)
-    def update(d: TasksState.Subscriber): Unit =
+class Orchestrator(jobs: JobsState) {
+  class MutableDelegator(private var delegator: JobsState.Subscriber) extends JobsState.Subscriber {
+    def isDefinedAt(x: (Option[Job], Option[Job])): Boolean = delegator.isDefinedAt(x)
+    def apply(v1: (Option[Job], Option[Job])) = delegator.apply(v1)
+    def update(d: JobsState.Subscriber): Unit =
       delegator = d
   }
 
   def getMonitors =
-    tasks.values.filter(_.role == TaskRole.Monitor)
+    jobs.values.filter(_.role == JobRole.Monitor)
 
   val currentBehavior = new MutableDelegator(start())
-  tasks.addSubscriber(currentBehavior)
+  jobs.addSubscriber(currentBehavior)
 
-  def setToRunning(task: Task): Unit =
-    tasks.updateTask(
-      task.withGoal(Some(RunState.Running)))
+  def setToRunning(job: Job): Unit =
+    jobs.updateJob(
+      job.withGoal(Some(RunState.Running)))
 
-  def start(): TasksState.Subscriber = {
+  def start(): JobsState.Subscriber = {
     getMonitors.filter(_.goal.nonEmpty).toList match {
       case Nil =>
         {
-          case (_, Some(task))
-              if task.pState.reservationConfirmed && task.role == TaskRole.Monitor =>
-            tasks.updateTask(
-              task.withGoal(Some(RunState.Running)))
-            currentBehavior.update(waitingMonLeader(task.taskId))
+          case (_, Some(job))
+              if job.pState.reservationConfirmed && job.role == JobRole.Monitor =>
+            jobs.updateJob(
+              job.withGoal(Some(RunState.Running)))
+            currentBehavior.update(waitingMonLeader(job.id))
         }
       case List(single) =>
-        waitingMonLeader(single.taskId)
+        waitingMonLeader(single.id)
       case more =>
         waitingMonQuorum
     }
   }
 
-  def waitingMonLeader(taskId: String): TasksState.Subscriber = {
-    if (tasks(taskId).runningState.nonEmpty) {
+  def waitingMonLeader(id: UUID): JobsState.Subscriber = {
+    if (jobs(id).runningState.nonEmpty) {
       waitingMonQuorum()
     } else {
       // TODO - wait for health checks when those are implemented
-      case (_, Some(task)) if task.taskId == taskId && task.runningState.nonEmpty =>
+      case (_, Some(job)) if job.id == id && job.runningState.nonEmpty =>
         currentBehavior.update(waitingMonQuorum())
     }
   }
@@ -50,7 +51,7 @@ class Orchestrator(tasks: TasksState) {
   /*
    TODO - implement condition pattern (with optimization hint to know when to re-evaluate the condition)
    */
-  def waitingMonQuorum(): TasksState.Subscriber = {
+  def waitingMonQuorum(): JobsState.Subscriber = {
     getMonitors.filter(_.goal.isEmpty).foreach(setToRunning)
 
     def quorumMonitorsAreRunning() = {
@@ -62,18 +63,18 @@ class Orchestrator(tasks: TasksState) {
     if (quorumMonitorsAreRunning())
       launchAll()
     else {
-      case (_, Some(task)) if task.role == TaskRole.Monitor =>
+      case (_, Some(job)) if job.role == JobRole.Monitor =>
         if (quorumMonitorsAreRunning())
           currentBehavior.update(launchAll())
     }
   }
 
-  def launchAll(): TasksState.Subscriber = {
-    tasks.values.filter(_.goal.isEmpty).foreach(setToRunning)
+  def launchAll(): JobsState.Subscriber = {
+    jobs.values.filter(_.goal.isEmpty).foreach(setToRunning)
 
     {
-      case (_, Some(task)) if task.goal.isEmpty =>
-        setToRunning(task)
+      case (_, Some(job)) if job.goal.isEmpty =>
+        setToRunning(job)
     }
   }
 }

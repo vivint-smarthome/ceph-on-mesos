@@ -5,20 +5,20 @@ import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo, DiskT
 import mesosphere.mesos.matcher.{ DiskResourceMatcher, ResourceMatcher, ScalarMatchResult, ScalarResourceMatcher }
 import mesosphere.mesos.protos.Resource.{CPUS, MEM, DISK, PORTS}
 import org.apache.mesos.Protos
-import com.vivint.ceph.model.{ CephConfig, Task, TaskRole }
+import com.vivint.ceph.model.{ CephConfig, Job, JobRole }
 import OfferMatchFactory.{OfferMatcher, getPeers, peersAssignedToSlave}
 import scaldi.Injector
 import scaldi.Injectable._
 
 object OfferMatchFactory {
-  type OfferMatcher = (Protos.Offer, Task, Iterable[Task]) => Option[ResourceMatcher.ResourceMatch]
-  def getPeers(task: Task, allTasks: Iterable[Task]): Stream[Task] = {
+  type OfferMatcher = (Protos.Offer, Job, Iterable[Job]) => Option[ResourceMatcher.ResourceMatch]
+  def getPeers(task: Job, allTasks: Iterable[Job]): Stream[Job] = {
     allTasks.toStream.filter { other =>
       other.id != task.id && other.role == task.role
     }
   }
 
-  def peersAssignedToSlave(slaveId: Protos.SlaveID, task: Task, allTasks: Iterable[Task]): Int = {
+  def peersAssignedToSlave(slaveId: Protos.SlaveID, task: Job, allTasks: Iterable[Job]): Int = {
     val peers = getPeers(task, allTasks)
     val offerSlaveId = slaveId.getValue
     peers.map(_.pState.slaveId).collect {
@@ -27,7 +27,7 @@ object OfferMatchFactory {
   }
 }
 
-trait OfferMatchFactory extends (CephConfig => Map[TaskRole.EnumVal, OfferMatcher]) {
+trait OfferMatchFactory extends (CephConfig => Map[JobRole.EnumVal, OfferMatcher]) {
 }
 
 class RGWOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends OfferMatcher {
@@ -50,7 +50,7 @@ class RGWOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
     ) ++ portMatcher
   }
 
-  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+  def apply(offer: Protos.Offer, task: Job, allTasks: Iterable[Job]): Option[ResourceMatcher.ResourceMatch] = {
     val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
     if (count < cephConfig.deployment.rgw.max_per_host) {
       ResourceMatcher.matchResources(offer, resourceMatchers, selector)
@@ -86,7 +86,7 @@ class OSDOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
         selector))
   }
 
-  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+  def apply(offer: Protos.Offer, task: Job, allTasks: Iterable[Job]): Option[ResourceMatcher.ResourceMatch] = {
     val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
     if (count < cephConfig.deployment.osd.max_per_host) {
       ResourceMatcher.matchResources(offer, resourceMatchers, selector)
@@ -121,7 +121,7 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
         selector))
   }
 
-  def apply(offer: Protos.Offer, task: Task, allTasks: Iterable[Task]): Option[ResourceMatcher.ResourceMatch] = {
+  def apply(offer: Protos.Offer, task: Job, allTasks: Iterable[Job]): Option[ResourceMatcher.ResourceMatch] = {
     val count = peersAssignedToSlave(offer.getSlaveId, task, allTasks)
     if (count < cephConfig.deployment.mon.max_per_host) {
       ResourceMatcher.matchResources(offer, resourceMatchers, selector)
@@ -134,11 +134,11 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
 class MasterOfferMatchFactory(implicit inj: Injector) extends OfferMatchFactory {
   val config = inject[AppConfiguration]
 
-  def apply(cephConfig: CephConfig): Map[TaskRole.EnumVal, OfferMatcher] = {
+  def apply(cephConfig: CephConfig): Map[JobRole.EnumVal, OfferMatcher] = {
     Map(
-      TaskRole.Monitor -> (new MonOfferMatcher(cephConfig, frameworkRole = config.role)),
-      TaskRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role)),
-      TaskRole.RGW -> (new RGWOfferMatcher(cephConfig, frameworkRole = config.role))
+      JobRole.Monitor -> (new MonOfferMatcher(cephConfig, frameworkRole = config.role)),
+      JobRole.OSD -> (new OSDOfferMatcher(cephConfig, frameworkRole = config.role)),
+      JobRole.RGW -> (new RGWOfferMatcher(cephConfig, frameworkRole = config.role))
     )
   }
 }

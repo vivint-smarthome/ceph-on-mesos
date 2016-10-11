@@ -36,7 +36,7 @@ object PlayJsonFormats{
   }
 
   implicit val RunStateFormat = enumFormat(RunState)
-  implicit val TaskRoleFormat = enumFormat(TaskRole)
+  implicit val JobRoleFormat = enumFormat(JobRole)
   implicit val LocationFormat = new Format[Location] {
     def reads(js: JsValue): JsResult[Location] =
       for {
@@ -69,7 +69,7 @@ object PlayJsonFormats{
   implicit val MonTaskFormat = Json.format[PersistentState]
   implicit val ClusterSecretsFormat = Json.format[ClusterSecrets]
 
-  implicit val TaskWriter = Writes[Task] { task =>
+  implicit val JobWriter = Writes[Job] { task =>
     Json.toJson(task.pState).as[JsObject] ++
     Json.obj(
       "version" -> task.version,

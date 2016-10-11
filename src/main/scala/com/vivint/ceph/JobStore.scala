@@ -7,7 +7,7 @@ import scala.async.Async.{async, await}
 import java.nio.charset.StandardCharsets.UTF_8
 import play.api.libs.json._
 
-case class TaskStore(kvStore: KVStore) {
+case class JobStore(kvStore: KVStore) {
   private val tasksPath = "tasks"
   import ExecutionContext.Implicits.global
 
@@ -15,7 +15,7 @@ case class TaskStore(kvStore: KVStore) {
 
   import PlayJsonFormats._
 
-  val taskPathRegex = s"^${TaskRole.values.mkString("|")}:".r
+  val taskPathRegex = s"^${JobRole.values.mkString("|")}:".r
   private val parsingFunction: PartialFunction[String, (String, (JsValue => PersistentState))] = {
     case path if taskPathRegex.findFirstMatchIn(path).nonEmpty =>
       (path, _.as[PersistentState])
