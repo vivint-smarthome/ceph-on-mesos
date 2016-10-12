@@ -1,5 +1,6 @@
 package com.vivint.ceph
 
+import akka.event.LoggingAdapter
 import java.util.UUID
 import org.apache.mesos.Protos
 import com.vivint.ceph.model.{ Location, PartialLocation, TaskState }
@@ -20,6 +21,7 @@ import Directives._
 
 class JobBehavior(
   secrets: ClusterSecrets,
+  log: LoggingAdapter,
   frameworkId: () => Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
@@ -29,7 +31,6 @@ class JobBehavior(
       filter(_.role == JobRole.Monitor).
       flatMap{_.pState.serviceLocation}(breakOut)
 
-  val resolver = inject[String => String]('ipResolver)
   val offerOperations = inject[OfferOperations]
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
@@ -399,7 +400,7 @@ class JobBehavior(
       map(_.min.toInt)
 
   private def deriveLocation(offer: Protos.Offer, defaultPort: Int = 6789): ServiceLocation = {
-    val ip = resolver(offer.getHostname)
+    val ip = offer.getUrl.getAddress.getIp
 
     val port = inferPort(offer.resources)
 

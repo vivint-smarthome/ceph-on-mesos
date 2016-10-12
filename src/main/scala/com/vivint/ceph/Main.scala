@@ -2,7 +2,6 @@ package com.vivint.ceph
 
 import akka.actor.{ ActorRef, ActorSystem, Props }
 import akka.pattern.BackoffSupervisor
-import java.net.InetAddress
 import org.apache.mesos.Protos._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
@@ -33,11 +32,6 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   implicit val system = ActorSystem("ceph-on-mesos")
 
   bind [AppConfiguration] to config
-
-  bind [String => String] identifiedBy 'ipResolver to { InetAddress.
-    getByName(_: String).
-    getHostAddress
-  }
 
   bind [KVStore] to {
     config.storageBackend match {

@@ -79,9 +79,6 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         zookeeper = "zk://test", offerTimeout = 5.seconds, publicNetwork = "10.11.12.0/24",
         clusterNetwork =  "10.11.12.0/24", storageBackend = "memory")
     }
-    bind [String => String] identifiedBy 'ipResolver to { _: String =>
-      "10.11.12.1"
-    }
   }
 
   def cephConfUpdates(implicit inj: Injector) = {

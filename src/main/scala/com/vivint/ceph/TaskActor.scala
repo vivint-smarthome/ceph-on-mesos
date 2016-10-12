@@ -132,7 +132,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   def receive = {
     case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
-      val behaviorSet = new JobBehavior(secrets, { () => frameworkId }, { () => cephConfig })
+      val behaviorSet = new JobBehavior(secrets, log, { () => frameworkId }, { () => cephConfig })
       _taskFSM = new JobFSM(jobs,
         log = log,
         behaviorSet = behaviorSet,

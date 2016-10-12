@@ -73,7 +73,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
       processEvents(
         processDirective(
           job,
-          job.behavior.submit(event, job, jobs.all)),
+          job.behavior.handleEvent(event, job, jobs.all)),
         rest)
     case Nil =>
       job
