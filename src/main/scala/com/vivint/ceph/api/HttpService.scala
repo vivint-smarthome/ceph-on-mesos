@@ -50,7 +50,7 @@ class HttpService(implicit inj: Injector) {
   def findTaskByUUID(id: UUID) =
     getTasks.map { _.values.find(_.id == id) }
 
-  def getConfig: Future[Array[Byte]] = {
+  def getConfig: Future[String] = {
     tSequence(
       ClusterSecretStore.createOrGenerateSecrets(kvStore),
       ConfigStore(kvStore).get,
@@ -58,16 +58,13 @@ class HttpService(implicit inj: Injector) {
       case (secrets, cfg, tasks) =>
         val monitors: Set[ServiceLocation] =
           tasks.values.filter(_.role == JobRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
-        makeTgz(
-          "etc/ceph/ceph.conf" -> configTemplates.cephConf(secrets, monitors, cfg.settings, None),
-          "etc/ceph/ceph.client.admin.keyring" -> configTemplates.cephClientAdminRing(secrets),
-          "etc/ceph/ceph.mon.keyring" -> configTemplates.cephMonRing(secrets))
+        configTemplates.cephConf(secrets, monitors, cfg.settings, None)
     }
   }
 
   def route = pathPrefix("v1") {
     // TODO - protect with key
-    path("config.tgz") {
+    path("config" / "ceph.conf") {
       complete(getConfig)
     } ~
     pathPrefix("tasks") {
