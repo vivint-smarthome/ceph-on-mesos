@@ -1,7 +1,7 @@
 package com.vivint.ceph.kvstore
 
 import akka.Done
-import java.util.concurrent.Executors
+import java.util.concurrent.{ Executors, TimeUnit }
 import org.apache.curator.framework.CuratorFramework
 import org.apache.curator.framework.state.{ ConnectionState, ConnectionStateListener }
 import org.apache.zookeeper.KeeperException.ConnectionLossException
@@ -33,8 +33,16 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
     build()
   client.start()
 
-  implicit private val ec = ExecutionContext.fromExecutor(
-    Executors.newSingleThreadExecutor())
+  val executor = Executors.newSingleThreadExecutor()
+  implicit private val ec = ExecutionContext.fromExecutor(executor)
+
+  Runtime.getRuntime.addShutdownHook(new Thread {
+    override def run(): Unit = {
+      System.err.println("Draining ZK writes")
+      executor.shutdown()
+      executor.awaitTermination(1, TimeUnit.MINUTES)
+    }
+  })
 
   def create(path: String, data: Array[Byte]): Future[Unit] = Future {
     client.create.

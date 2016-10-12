@@ -38,6 +38,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
   val idx = new AtomicInteger()
   val fileStorePath = new File("tmp/test-store")
+  implicit val timeout = Timeout(3.seconds)
   import ProtoHelpers._
 
   def await[T](f: Awaitable[T], duration: FiniteDuration = 5.seconds) = {
@@ -332,7 +333,6 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     }
   }
 
-
   it("should kill a task in response to a goal change") {
     new OneMonitorRunning {
       import module.injector
@@ -446,8 +446,6 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         ()
     }
 
-    implicit val timeout = Timeout(3.seconds)
-
     val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetTasks).mapTo[Map[UUID, Job]]).
       values.
       partition(_.taskId == Some(launchedTaskId))
@@ -466,6 +464,61 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         val shCommand = task.getCommand.getValue
         shCommand.contains("entrypoint.sh mon") shouldBe true
         shCommand.contains("ceph mon getmap") shouldBe true
+    }
+  }
+
+  def getTasks(implicit inj: Injector) = {
+    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
+  }
+
+  it("should launch RGW tasks with provided docker settings, and keep the RGW task up") {
+    new OneMonitorRunning {
+      import module.injector
+
+      updateConfig("""
+        |deployment.rgw {
+        |  count = 1
+        |  port = 80
+        |  docker_args {
+        |    hostname = "le-docker.host.rgw"
+        |    network = "weave"
+        |  }
+        |}
+        |""".stripMargin)
+
+      probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
+      val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).build
+
+      taskActor ! FrameworkActor.ResourceOffers(List(offer))
+
+      val (rgwJobId, launchedTaskId) = inside(gatherResponse(probe, offer, ignoreRevive)) {
+        case offerResponse: FrameworkActor.AcceptOffer =>
+          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+          val List(task) = offerResponse.operations(0).getLaunch.tasks
+          val shCommand = task.getCommand.getValue
+
+          val dockerParams = task.getContainer.getDocker.params
+          dockerParams("hostname") shouldBe ("le-docker.host.rgw")
+          dockerParams("network") shouldBe ("weave")
+          shCommand.contains("RGW_CIVETWEB_PORT=80") shouldBe true
+          shCommand.contains("entrypoint.sh rgw") shouldBe true
+          (UUID.fromString(task.getLabels.get(Constants.JobIdLabel).get), task.getTaskId.getValue)
+      }
+
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(launchedTaskId, offer.getSlaveId.getValue, Protos.TaskState.TASK_RUNNING))
+
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(launchedTaskId, offer.getSlaveId.getValue, Protos.TaskState.TASK_FAILED))
+
+      val rgwJobAfterLaunch = getTasks.apply(rgwJobId)
+
+      rgwJobAfterLaunch.behavior.name shouldBe "MatchAndLaunchEphemeral"
+      rgwJobAfterLaunch.taskId shouldBe None
+      rgwJobAfterLaunch.slaveId shouldBe None
+      rgwJobAfterLaunch.wantingNewOffer shouldBe true
+
+      Thread.sleep(1000)
     }
   }
 }

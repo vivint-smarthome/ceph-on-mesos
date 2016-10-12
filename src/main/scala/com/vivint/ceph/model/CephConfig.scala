@@ -31,7 +31,7 @@ case class RGWDeploymentConfig(
   cpus: Double,
   mem: Double,
   port: Option[Int],
-  docker_flags: List[String],
+  docker_args: Map[String, String],
   max_per_host: Int
 )
 
@@ -72,7 +72,8 @@ deployment {
 
   rgw {
     max_per_host = 1
-    docker_flags = []
+    docker_args {
+    }
   }
 }
 

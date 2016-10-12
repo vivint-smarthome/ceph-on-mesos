@@ -99,9 +99,21 @@ object ProtoHelpers {
     }
     b.build
   }
-
   def newLabel(key: String, value: String): Label = {
     Label.newBuilder.setKey(key).setValue(value).build
+  }
+
+
+  def newParameters(kvs: (String, String)*): Parameters = {
+    val b = Parameters.newBuilder
+    kvs.foreach { case (key, value) =>
+      b.addParameter(newParameter(key,value))
+    }
+    b.build
+  }
+
+  def newParameter(key: String, value: String): Parameter = {
+    Parameter.newBuilder.setKey(key).setValue(value).build
   }
 
   def newTaskId(taskId: String): TaskID = {
@@ -266,4 +278,11 @@ object ProtoHelpers {
     }
   }
 
+  implicit class RichDocker(docker: ContainerInfo.DockerInfo) {
+    def params: Map[String, String] = {
+      docker.getParametersList.map { p =>
+        p.getKey -> p.getValue
+      }(breakOut)
+    }
+  }
 }

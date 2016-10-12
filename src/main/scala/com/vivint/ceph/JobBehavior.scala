@@ -9,6 +9,7 @@ import Behavior._
 import scala.collection.immutable.NumericRange
 import scala.concurrent.duration._
 import scala.collection.breakOut
+import scala.collection.JavaConverters._
 import model.ClusterSecrets
 import scaldi.Injector
 import scaldi.Injectable._
@@ -51,13 +52,13 @@ class JobBehavior(
     }
   }
 
-  case object InitializeLogic extends Behavior {
+  case object InitializeResident extends Behavior {
     override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       decideWhatsNext(state: Job, fullState: Map[UUID, Job]): Directive
     }
 
     def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive =
-      throw new IllegalStateException("handleEvent called on InitializeLogic")
+      throw new IllegalStateException("handleEvent called on InitializeResident")
   }
 
   case class WaitForSync(nextBehavior: DecideFunction) extends Behavior {
@@ -200,6 +201,90 @@ class JobBehavior(
     }
   }
 
+
+  case object MatchAndLaunchEphemeral extends Behavior {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
+      if (state.goal.isEmpty)
+        Transition(WaitForGoal{ (_,_) => MatchAndLaunchEphemeral})
+      else if (state.taskStatus.nonEmpty)
+        Transition(EphemeralRunning)
+      else
+        WantOffers
+    }
+
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = event match {
+      case MatchedOffer(pendingOffer, matchResult) =>
+        state.role match {
+          case JobRole.RGW =>
+            val port =
+              deploymentConfig().deployment.rgw.port orElse inferPort(pendingOffer.offer.resources)
+            val location = PartialLocation(None, port)
+            val newTaskId = Job.makeTaskId(state.role, state.cluster)
+            Persist(
+              state.pState.copy(
+                slaveId = Some(pendingOffer.offer.getSlaveId.getValue),
+                taskId = Some(newTaskId),
+                location = location
+              )).
+              andAlso(
+                OfferResponse(
+                  pendingOffer,
+                  launchRGWCommand(
+                    taskId = newTaskId,
+                    pendingOffer.offer,
+                    state,
+                    location = location,
+                    monLocations = getMonLocations(fullState),
+                    port = port.getOrElse(80)))).
+              withTransition(EphemeralRunning)
+          case _ =>
+            ???
+        }
+      case _  =>
+        Stay
+    }
+  }
+
+  case object EphemeralRunning extends Behavior {
+    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
+      if (state.taskId.isEmpty)
+        throw new IllegalStateException(s"Can't be EphemeralRunning without a taskId")
+      if (state.slaveId.isEmpty)
+        throw new IllegalStateException(s"Can't be EphemeralRunning without a slaveId")
+
+      SetBehaviorTimer("timeout", 60.seconds) andAlso decideWhatsNext(state)
+    }
+
+    def relaunch(state:Job): Directive =
+      Persist(state.pState.copy(taskId = None, slaveId = None, location = Location.empty)).
+        withTransition(MatchAndLaunchEphemeral)
+
+    def decideWhatsNext(state: Job): Directive = {
+      state.taskState match {
+        case Some(_: TaskState.Terminal) =>
+          relaunch(state)
+        case other =>
+          Stay
+      }
+    }
+
+    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = event match {
+      case JobUpdated(_) =>
+        decideWhatsNext(state)
+      case Timer("timeout") =>
+        if (state.taskState.isEmpty) {
+          // task failed to launch. Try again.
+          relaunch(state)
+        } else {
+          Stay
+        }
+      case Timer(_) =>
+        Stay
+      case MatchedOffer(offer, _) =>
+        OfferResponse(offer, Nil)
+    }
+  }
+
   case object Running extends Behavior {
     def reservationConfirmed(state:Job) =
       state.pState.reservationConfirmed
@@ -320,7 +405,7 @@ class JobBehavior(
   }
 
   private def launchMonCommand(
-    taskId: String, isLeader: Boolean, offer: Protos.Offer, task: Job, taskLocation: ServiceLocation,
+    taskId: String, isLeader: Boolean, offer: Protos.Offer, job: Job, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
       List[Protos.Offer.Operation] = {
 
@@ -340,7 +425,8 @@ class JobBehavior(
 
     val taskInfo = launchCephCommand(
       taskId = taskId,
-      role = task.role,
+      jobId = job.id,
+      role = job.role,
       offer = offer,
       location = taskLocation,
       templatesTgz = templatesTgz,
@@ -385,6 +471,7 @@ class JobBehavior(
 
     val taskInfo = launchCephCommand(
       taskId = taskId,
+      jobId = job.id,
       role = job.role,
       offer = offer,
       location = taskLocation,
@@ -425,16 +512,61 @@ class JobBehavior(
         newLaunchOperation(Seq(taskInfo.build))))
   }
 
-  private def launchCephCommand(taskId: String, role: JobRole.EnumVal, command: String, offer: Protos.Offer,
-    location: Location, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte]) = {
+  private def launchRGWCommand(
+    taskId: String, offer: Protos.Offer, job: Job, location: Location,
+    monLocations: Set[ServiceLocation], port: Int):
+      List[Protos.Offer.Operation] = {
+    val pullMonMapCommand = {
+      """if [ ! -f /etc/ceph/monmap-ceph ]; then
+        |  echo "Pulling monitor map"; ceph mon getmap -o /etc/ceph/monmap-ceph
+        |fi
+        |""".stripMargin
+    }
+
+    val cephConfig = deploymentConfig()
+    val templatesTgz = configTemplates.tgz(
+      secrets = secrets,
+      monitors = monLocations,
+      cephSettings = cephConfig.settings)
+
+    val taskInfo = launchCephCommand(
+      taskId = taskId,
+      jobId = job.id,
+      role = job.role,
+      offer = offer,
+      location = location,
+      templatesTgz = templatesTgz,
+      dockerArgs = cephConfig.deployment.rgw.docker_args,
+      command =
+            s"""
+            |set -x -e
+            |echo "Pulling monitor map"
+            |ceph mon getmap -o /etc/ceph/monmap-ceph
+            |
+            |RGW_CIVETWEB_PORT=${port} /entrypoint.sh rgw
+            |""".stripMargin
+    )
+
+    List(
+      newOfferOperation(
+        newLaunchOperation(Seq(taskInfo.build))))
+  }
+
+
+  private def launchCephCommand(taskId: String, jobId: UUID, role: JobRole.EnumVal, command: String,
+    offer: Protos.Offer, location: Location, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte],
+    dockerArgs: Map[String, String] = Map.empty) = {
     // We launch!
+
+    val dockerParameters = dockerArgs.map((newParameter(_,_)).tupled)
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
       setDocker(
         Protos.ContainerInfo.DockerInfo.newBuilder.
           setImage("ceph/daemon:tag-build-master-jewel-ubuntu-14.04").
           setNetwork(Protos.ContainerInfo.DockerInfo.Network.HOST).
-          setForcePullImage(true)
+          setForcePullImage(true).
+          addAllParameters(dockerParameters.asJava)
       ).
       addVolumes(
         newVolume(
@@ -469,6 +601,7 @@ class JobBehavior(
     }
 
     val labels = Protos.Labels.newBuilder
+    labels.addLabels(newLabel(Constants.JobIdLabel, jobId.toString))
     labels.addLabels(newLabel(Constants.FrameworkIdLabel, frameworkId().getValue))
     location.hostnameOpt.foreach { hostname =>
       labels.addLabels(newLabel(Constants.HostnameLabel, hostname))
@@ -496,5 +629,8 @@ class JobBehavior(
     taskInfo
   }
 
-  def defaultBehavior(role: JobRole.EnumVal) = InitializeLogic
+  def defaultBehavior(role: JobRole.EnumVal) = role match {
+    case JobRole.Monitor | JobRole.OSD => InitializeResident
+    case JobRole.RGW => MatchAndLaunchEphemeral
+  }
 }

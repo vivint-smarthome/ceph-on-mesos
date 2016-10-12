@@ -100,7 +100,10 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         }
         job.copy(heldOffer = Some((offer, resourceMatch)))
       case Directives.Persist(data) =>
-        job.copy(pState = data)
+          job.copy(
+            pState = data,
+            taskState = if (job.taskId != data.taskId) None else job.taskState
+          )
       case Directives.SetBehaviorTimer(name, duration: FiniteDuration) =>
         setBehaviorTimer(job, name, duration)
         job
@@ -181,6 +184,10 @@ object Directives {
       ActionList(actions :+ other)
   }
 
+  /** Update the persistent state for a job. State is stored asynchronously and success can be tracked by version and
+    * persistentVersion job fields.
+    * If changing taskId then TaskState is assumed unknown (None)
+    */
   case class Persist(data: PersistentState) extends Action
   case object KillTask extends Action
   case class Hold(offer: PendingOffer, resourceMatch: Option[ResourceMatcher.ResourceMatch]) extends Action
