@@ -295,7 +295,7 @@ class JobBehavior(
     override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       if(! state.reservationConfirmed)
         throw new IllegalStateException("Can't go to running state without a confirmed reservation")
-      nextRunAction(state, fullState)
+      Revive andAlso nextRunAction(state, fullState)
     }
 
     def nextRunAction(state: Job, fullState: Map[UUID, Job]): Directive = {
@@ -369,9 +369,14 @@ class JobBehavior(
                 ???
             }
           }
-        case JobUpdated(_) =>
+        case JobUpdated(prior) =>
           // if the goal has changed then we need to revaluate our next run state
-          nextRunAction(state, fullState)
+          val next = nextRunAction(state, fullState)
+          if (prior.runningState.nonEmpty && state.runningState.isEmpty) /* oops we lost it! */ {
+            Revive andAlso next
+          } else {
+            next
+          }
       }
     }
   }
@@ -430,12 +435,12 @@ class JobBehavior(
       offer = offer,
       location = taskLocation,
       templatesTgz = templatesTgz,
+      vars = Seq("MON_IP" -> taskLocation.ip, "MON_NAME" -> taskLocation.hostname),
       command =
         runState match {
           case RunState.Running =>
             s"""
             |sed -i "s/:6789/:${taskLocation.port}/g" /entrypoint.sh config.static.sh
-            |export MON_IP=$$(hostname -i | cut -f 1 -d ' ')
             |${pullMonMapCommand}
             |/entrypoint.sh mon
             |""".stripMargin
@@ -558,7 +563,7 @@ class JobBehavior(
     dockerArgs: Map[String, String] = Map.empty) = {
     // We launch!
 
-    val dockerParameters = dockerArgs.map((newParameter(_,_)).tupled)
+    val dockerParameters = (location.hostnameOpt.map("hostname" -> _) ++ dockerArgs).map((newParameter(_,_)).tupled)
     val container = Protos.ContainerInfo.newBuilder.
       setType(Protos.ContainerInfo.Type.DOCKER).
       setDocker(

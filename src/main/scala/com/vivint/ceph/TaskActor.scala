@@ -316,8 +316,11 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         case Some(job) =>
           jobs.updateJob(job.withTaskStatus(taskStatus))
         case None =>
-          log.info("Received task status update for unknown taskId {}; killing", taskStatus.getTaskId.getValue)
-          frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
+          if (TaskState.fromMesos(taskStatus.getState).isInstanceOf[TaskState.Active]) {
+            log.info("Received running task status update for unknown taskId {}; killing", taskStatus.getTaskId.getValue)
+            frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
+          }
+
       }
 
     case FrameworkActor.ResourceOffers(offers) =>

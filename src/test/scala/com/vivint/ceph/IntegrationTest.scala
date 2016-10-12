@@ -164,6 +164,76 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     }.toMap
 
 
+  def getTasks(implicit inj: Injector) = {
+    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
+  }
+
+  @tailrec final def pollTasks(duration: FiniteDuration, frequency: FiniteDuration = 50.millis)(
+    poller: Map[UUID, Job] => Boolean)(implicit inj: Injector): Map[UUID, Job] = {
+    val before = System.currentTimeMillis()
+    val tasks = getTasks
+    if (poller(tasks))
+      tasks
+    else if (duration < 0.millis) {
+      fail("Predicate for poll tasks didn't match in time")
+    } else {
+      val surpassed = System.currentTimeMillis() - before
+      Thread.sleep(Math.max(0, frequency.toMillis - surpassed))
+      val totalSurpassed = System.currentTimeMillis() - before
+      pollTasks(duration - totalSurpassed.millis, frequency)(poller)
+    }
+  }
+
+  trait OneMonitorRunning {
+    implicit val ec: ExecutionContext = SameThreadExecutionContext
+    val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
+    val cluster = "ceph"
+    val monitorTaskId = model.Job.makeTaskId(JobRole.Monitor, cluster)
+    val monitorTask = PersistentState(
+      id = UUID.randomUUID(),
+      cluster = "ceph",
+      role = JobRole.Monitor,
+      lastLaunched = Some(RunState.Running),
+      goal = Some(RunState.Running),
+      reservationConfirmed = true,
+      slaveId = Some("slave-12"),
+      taskId = Some(monitorTaskId),
+      location = monLocation)
+
+    val module = new TestBindings {
+      bind [KVStore] to {
+        val store = new kvstore.MemStore
+        val taskStore = new JobStore(store)
+        taskStore.save(monitorTask)
+        store
+      }
+    }
+
+    import module.injector
+
+    val taskActor = inject[ActorRef](classOf[TaskActor])
+    val probe = inject[TestProbe]
+    implicit val sender = probe.ref
+
+    inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
+
+    val kvStore = inject[KVStore]
+    val configStore = new ConfigStore(inject[KVStore])
+    implicit val materializer = ActorMaterializer()
+
+    // Wait for configuration update
+    val config = await(cephConfUpdates.runWith(Sink.head))
+
+    inside(Option(probe.receiveOne(5.seconds))) {
+      case Some(r: FrameworkActor.Reconcile) =>
+        r.tasks.length shouldBe 1
+        val taskStatus = r.tasks.head
+        taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
+    }
+
+    probe.receiveOne(5.seconds) shouldBe (FrameworkActor.Reconcile(Nil))
+  }
+
   it("should launch a monitors on unique hosts") {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
     val module = new TestBindings {}
@@ -250,69 +320,18 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     module.destroy(_ => true)
   }
 
-  def getTasks(implicit inj: Injector) = {
-    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
-  }
-
-  trait OneMonitorRunning {
-    implicit val ec: ExecutionContext = SameThreadExecutionContext
-    val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
-    val cluster = "ceph"
-    val monitorTaskId = model.Job.makeTaskId(JobRole.Monitor, cluster)
-    val monitorTask = PersistentState(
-      id = UUID.randomUUID(),
-      cluster = "ceph",
-      role = JobRole.Monitor,
-      lastLaunched = Some(RunState.Running),
-      goal = Some(RunState.Running),
-      reservationConfirmed = true,
-      slaveId = Some("slave-12"),
-      taskId = Some(monitorTaskId),
-      location = monLocation)
-
-    val module = new TestBindings {
-      bind [KVStore] to {
-        val store = new kvstore.MemStore
-        val taskStore = new JobStore(store)
-        taskStore.save(monitorTask)
-        store
-      }
-    }
-
-    import module.injector
-
-    val taskActor = inject[ActorRef](classOf[TaskActor])
-    val probe = inject[TestProbe]
-    implicit val sender = probe.ref
-
-    inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
-
-    val kvStore = inject[KVStore]
-    val configStore = new ConfigStore(inject[KVStore])
-    implicit val materializer = ActorMaterializer()
-
-    // Wait for configuration update
-    val config = await(cephConfUpdates.runWith(Sink.head))
-
-    inside(Option(probe.receiveOne(5.seconds))) {
-      case Some(r: FrameworkActor.Reconcile) =>
-        r.tasks.length shouldBe 1
-        val taskStatus = r.tasks.head
-        taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
-    }
-
-    probe.receiveOne(5.seconds) shouldBe (FrameworkActor.Reconcile(Nil))
-  }
-
   it("should launch OSDs") {
     new OneMonitorRunning {
       import module.injector
       updateConfig("deployment.osd.count = 1")
       probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
 
+      pollTasks(5.seconds) { _.values.exists { job => job.role == JobRole.OSD && job.wantingNewOffer } }
+
       val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).
         addResources(newScalarResource(
           DISK, 1024000.0, disk = Some(MesosTestHelper.mountDisk("/mnt/ssd-1")))).build
+
       taskActor ! FrameworkActor.ResourceOffers(List(offer))
 
       val reservedOffer = inside(Option(gatherResponse(probe, offer, ignoreRevive)))(handleReservationResponse(offer))
@@ -332,10 +351,9 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           cephConfig.lines.filter(_.contains("ms_bind_port")).toList shouldBe List(
             "ms_bind_port_min = 31000",
             "ms_bind_port_max = 31004")
-          cephConfig.lines.filter(_.startsWith("mon")).take(3).toList shouldBe List(
+          cephConfig.lines.filter(_.startsWith("mon")).take(2).toList shouldBe List(
             s"mon initial members = ${monLocation.hostname}",
-            s"mon host = ${monLocation.hostname}:${monLocation.port}",
-            s"mon addr = ${monLocation.ip}:${monLocation.port}")
+            s"mon host = ${monLocation.ip}:${monLocation.port}")
       }
     }
   }
@@ -493,6 +511,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
       probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
       val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).build
+
+      pollTasks(5.seconds) { _.values.exists { job => job.role == JobRole.RGW && job.wantingNewOffer } }
 
       taskActor ! FrameworkActor.ResourceOffers(List(offer))
 

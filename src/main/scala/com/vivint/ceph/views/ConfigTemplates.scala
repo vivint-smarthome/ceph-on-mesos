@@ -52,8 +52,7 @@ class ConfigTemplates(implicit inj: Injector) {
 [global]
 fsid = ${secrets.fsid}
 mon initial members = ${sortedMonitors.map(_.hostname).mkString(",")}
-mon host = ${sortedMonitors.map { m => m.hostname + ":" + m.port }.mkString(",")}
-mon addr = ${sortedMonitors.map { m => m.ip + ":" + m.port }.mkString(",")}
+mon host = ${sortedMonitors.map { m => m.ip + ":" + m.port }.mkString(",")}
 auth cluster required = cephx
 auth service required = cephx
 auth client required = cephx

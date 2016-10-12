@@ -121,7 +121,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         job.taskId.foreach(killTask)
         job
       case Directives.OfferResponse(pendingOffer, operations) =>
-        pendingOffer.resultingOperationsPromise.success(operations.toList)
+        pendingOffer.resultingOperationsPromise.trySuccess(operations.toList)
         job
     }
   }
