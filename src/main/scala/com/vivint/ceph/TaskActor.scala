@@ -174,6 +174,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     if (taskIdsForReconciliation.isEmpty) {
       log.info("Skipping reconciliation; no known tasks to reconcile")
+      frameworkActor ! FrameworkActor.Reconcile(Nil)
       context.become(ready)
       return ()
     }
@@ -222,6 +223,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           reconciliationTimer.cancel()
           unstashAll()
           log.info("reconciliation complete")
+          frameworkActor ! FrameworkActor.Reconcile(Nil)
           context.become(ready)
         }
       case _ => stash()
@@ -309,10 +311,14 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   }
 
   def ready: Receive = {
-    case FrameworkActor.StatusUpdate(taskStatus) if jobs containsTaskId taskStatus.getTaskId.getValue =>
-      val priorState = jobs.getByTaskId(taskStatus.getTaskId.getValue).get
-      val nextState = priorState.withTaskStatus(taskStatus)
-      jobs.updateJob(nextState)
+    case FrameworkActor.StatusUpdate(taskStatus) =>
+      jobs.getByTaskId(taskStatus.getTaskId.getValue) match {
+        case Some(job) =>
+          jobs.updateJob(job.withTaskStatus(taskStatus))
+        case None =>
+          log.info("Received task status update for unknown taskId {}; killing", taskStatus.getTaskId.getValue)
+          frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
+      }
 
     case FrameworkActor.ResourceOffers(offers) =>
       offers.foreach { offer =>

@@ -184,6 +184,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
     updateConfig("deployment.mon.count = 2")
 
+    probe.receiveOne(5.seconds) shouldBe FrameworkActor.Reconcile(Nil)
     probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
 
     val offer = MesosTestHelper.makeBasicOffer(slaveId = 0).build
@@ -249,6 +250,10 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     module.destroy(_ => true)
   }
 
+  def getTasks(implicit inj: Injector) = {
+    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
+  }
+
   trait OneMonitorRunning {
     implicit val ec: ExecutionContext = SameThreadExecutionContext
     val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
@@ -295,6 +300,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         val taskStatus = r.tasks.head
         taskActor ! FrameworkActor.StatusUpdate(taskStatus.toBuilder.setState(Protos.TaskState.TASK_RUNNING).build)
     }
+
+    probe.receiveOne(5.seconds) shouldBe (FrameworkActor.Reconcile(Nil))
   }
 
   it("should launch OSDs") {
@@ -410,6 +417,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     // Wait for configuration update
     val config = await(cephConfUpdates.runWith(Sink.head))
 
+    probe.receiveOne(5.seconds) shouldBe a[FrameworkActor.Reconcile]
+
     updateConfig("deployment.mon.count = 2")
 
     probe.receiveOne(5.seconds) shouldBe FrameworkActor.ReviveOffers
@@ -465,10 +474,6 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         shCommand.contains("entrypoint.sh mon") shouldBe true
         shCommand.contains("ceph mon getmap") shouldBe true
     }
-  }
-
-  def getTasks(implicit inj: Injector) = {
-    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
   }
 
   it("should launch RGW tasks with provided docker settings, and keep the RGW task up") {
