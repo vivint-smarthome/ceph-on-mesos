@@ -30,7 +30,7 @@ case class FrameworkIdStore(implicit injector: Injector) {
     */
   def set(value: Protos.FrameworkID): Future[Unit] = {
     val bytes = value.getValue.getBytes("UTF-8")
-    kvStore.set(ksPath, bytes).andThen { case _ =>
+    kvStore.createOrSet(ksPath, bytes).andThen { case _ =>
       getP.trySuccess(value)
     }
   }

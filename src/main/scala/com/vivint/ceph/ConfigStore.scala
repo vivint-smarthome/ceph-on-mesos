@@ -21,7 +21,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
         val byteArray =
           try { IOUtils.toByteArray(f) }
           finally { f.close() }
-        kvStore.createAndSet(configPath, byteArray)
+        kvStore.createOrSet(configPath, byteArray)
       case Some(_) =>
         Future.successful(())
     }

@@ -17,14 +17,13 @@ class MemStore extends KVStore {
   implicit private val ec = ExecutionContext.fromExecutor(
     Executors.newSingleThreadExecutor())
 
-  private var paths = Set.empty[File]
   private var state = Map.empty[File, Array[Byte]]
   private var subscriptions = Set.empty[SourceQueueWithComplete[File]]
 
   private def createFolders(path: File): Unit = {
     val parent = path.getParentFile
-    if (parent != null) {
-      paths = paths + parent
+    if ((parent != null) && (!state.contains(parent))) {
+      state = state + (parent -> Array.empty)
       createFolders(parent)
     }
   }
@@ -44,20 +43,23 @@ class MemStore extends KVStore {
     val output = fileFor(path)
     if (state.contains(output))
       throw new RuntimeException(s"path ${path} already exists")
-    createFolders(output)
+
+    if (! state.contains(output.getParentFile))
+      throw new RuntimeException(s"no such parent for ${output}: ${output.getParentFile}")
+
     state = state.updated(output, data)
     subscriptions.foreach(_.offer(output))
   }
 
   def set(path: String, data: Array[Byte]): Future[Unit] = Future {
     val output = fileFor(path)
-    if (! paths.contains(output.getParentFile))
-      throw new RuntimeException(s"no such parent for ${output}: ${output.getParentFile}")
+    if (!state.contains(output))
+      throw new RuntimeException(s"path ${path} doesn't exist")
     state = state.updated(output, data)
     subscriptions.foreach(_.offer(output))
   }
 
-  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = Future {
+  def createOrSet(path: String, data: Array[Byte]): Future[Unit] = Future {
     val output = fileFor(path)
     createFolders(output)
     state = state.updated(output, data)
@@ -66,6 +68,8 @@ class MemStore extends KVStore {
 
   def delete(path: String): Future[Unit] = Future {
     val deleteFile = fileFor(path)
+    if (!state.contains(deleteFile))
+      throw new RuntimeException(s"path ${path} doesn't exist")
     state = state - deleteFile
     subscriptions.foreach(_.offer(deleteFile))
   }

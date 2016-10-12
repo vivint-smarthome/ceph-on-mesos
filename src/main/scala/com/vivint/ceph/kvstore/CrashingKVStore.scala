@@ -30,7 +30,7 @@ case class CrashingKVStore(kvStore: KVStore) extends KVStore {
   override def getAll(paths: Seq[String]): Future[Seq[Option[Array[Byte]]]] = wrap(() => kvStore.getAll(paths))
   def create(path: String, data: Array[Byte]): Future[Unit] = wrap(() => kvStore.create(path, data))
   def set(path: String, data: Array[Byte]): Future[Unit] = wrap(() => kvStore.set(path, data))
-  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = wrap(() => kvStore.createAndSet(path, data))
+  def createOrSet(path: String, data: Array[Byte]): Future[Unit] = wrap(() => kvStore.createOrSet(path, data))
   def delete(path: String): Future[Unit] = wrap(() => kvStore.delete(path))
   def get(path: String): Future[Option[Array[Byte]]] = wrap(() => kvStore.get(path))
   def children(path: String): Future[Seq[String]] = wrap(() => kvStore.children(path))

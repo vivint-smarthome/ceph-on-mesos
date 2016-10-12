@@ -33,6 +33,6 @@ case class JobStore(kvStore: KVStore) {
 
   def save(task: PersistentState): Future[Unit] = {
     val data = Json.toJson(task).toString
-    kvStore.createAndSet(s"tasks/${task.role}:" + task.id.toString, data.getBytes(UTF_8))
+    kvStore.createOrSet(s"tasks/${task.role}:" + task.id.toString, data.getBytes(UTF_8))
   }
 }

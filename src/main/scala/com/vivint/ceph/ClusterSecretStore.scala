@@ -18,7 +18,7 @@ object ClusterSecretStore {
           Json.parse(secrets).as[ClusterSecrets])
       case None =>
         val secrets = ClusterSecrets.generate
-        kvStore.set("secrets.json", Json.toJson(secrets).toString().getBytes(UTF_8)).map { case _ =>
+        kvStore.create("secrets.json", Json.toJson(secrets).toString().getBytes(UTF_8)).map { case _ =>
           secrets }
     }
   }

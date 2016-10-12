@@ -39,16 +39,16 @@ class FileStore(basePath: File) extends KVStore {
     f.close()
   }
 
-  private [this] def createAndSetSync(output: File, data: Array[Byte]): Unit = {
+  private [this] def createOrSetSync(output: File, data: Array[Byte]): Unit = {
     output.getParentFile.mkdirs()
     val f = new FileOutputStream(output)
     IOUtils.writeChunked(data, f)
     f.close()
   }
 
-  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = Future {
+  def createOrSet(path: String, data: Array[Byte]): Future[Unit] = Future {
     val output = fileFor(path)
-    createAndSetSync(output, data)
+    createOrSetSync(output, data)
   }
 
   def delete(path: String): Future[Unit] = Future {
@@ -71,7 +71,7 @@ class FileStore(basePath: File) extends KVStore {
 
   def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
     val lockFile = fileFor(path)
-    createAndSetSync(lockFile, Array.empty)
+    createOrSetSync(lockFile, Array.empty)
     val raf = new RandomAccessFile(lockFile, "rw")
     val lock = raf.getChannel().tryLock()
     if (lock == null)

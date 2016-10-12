@@ -28,51 +28,74 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
   val appConfiguration = inject[AppConfiguration]
   val client = CuratorFrameworkFactory.builder.
     connectString(appConfiguration.zookeeper).
-    namespace(namespace).
     retryPolicy(retryPolicy).
     build()
   client.start()
 
+
   val executor = Executors.newSingleThreadExecutor()
   implicit private val ec = ExecutionContext.fromExecutor(executor)
+
+  Future {
+    val p = s"/${namespace}"
+    Option(client.checkExists.forPath(p)).
+      getOrElse(client.create.forPath(p))
+  }.onFailure {
+    case ex: Throwable =>
+      System.err.println(s"Something seriously went wrong; couldn't assert the existence of ${namespace}. ${ex}")
+      ex.printStackTrace(System.err)
+  }
 
   Runtime.getRuntime.addShutdownHook(new Thread {
     override def run(): Unit = {
       System.err.println("Draining ZK writes")
       executor.shutdown()
       executor.awaitTermination(1, TimeUnit.MINUTES)
+      System.err.println("Successfully drained")
     }
   })
 
+  private def sanitizePath(path: String): String = {
+    if (path.startsWith("/"))
+      s"/${namespace}${path}"
+    else
+      s"/${namespace}/${path}"
+  }
+
   def create(path: String, data: Array[Byte]): Future[Unit] = Future {
+    val sPath = sanitizePath(path)
     client.create.
-      creatingParentsIfNeeded.
-      forPath(path, data)
+      forPath(sPath, data)
     client.setData.
-      forPath(path, data)
+      forPath(sPath, data)
   }
 
   def set(path: String, data: Array[Byte]): Future[Unit] = Future {
-      client.setData.
-      forPath(path, data)
+    val sPath = sanitizePath(path)
+    client.setData.
+      forPath(sPath, data)
   }
 
-  def createAndSet(path: String, data: Array[Byte]): Future[Unit] = Future {
-    Try {
-      client.create.
-        creatingParentsIfNeeded.
-        forPath(path)
+  def createOrSet(path: String, data: Array[Byte]): Future[Unit] = Future {
+    val sPath = sanitizePath(path)
+    try {
+      client.setData.
+        forPath(sPath, data)
+    } catch { case ex: KeeperException.NoNodeException =>
+        client.create.
+          creatingParentsIfNeeded.
+          forPath(sPath)
     }
-    client.setData.
-      forPath(path, data)
   }
 
   def delete(path: String): Future[Unit] = Future {
-    client.delete.forPath(path)
+    val sPath = sanitizePath(path)
+    client.delete.forPath(sPath)
   }
 
   def get(path: String): Future[Option[Array[Byte]]] = Future {
-    try Some(client.getData.forPath(path))
+    val sPath = sanitizePath(path)
+    try Some(client.getData.forPath(sPath))
     catch {
       case _: KeeperException.NoNodeException =>
         None
@@ -80,11 +103,17 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
   }
 
   def children(path: String): Future[Seq[String]] = Future {
-    client.getChildren.forPath(path).toList
+    val sPath = sanitizePath(path)
+    try client.getChildren.forPath(sPath).toList
+    catch {
+      case ex: KeeperException.NoNodeException =>
+        Nil
+    }
   }
 
   def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
-    val lock = new InterProcessSemaphoreMutex(client, path)
+    val sPath = sanitizePath(path)
+    val lock = new InterProcessSemaphoreMutex(client, sPath)
     lock.acquire()
     val p = Promise[Done]
 
@@ -108,8 +137,9 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
   }
 
   private def wireSourceQueue(path: String, queue: SourceQueueWithComplete[Option[Array[Byte]]]): Future[Unit] = Future {
+    val sPath = sanitizePath(path)
     var _isCancelled = false
-    val l = new NodeCache(client, path)
+    val l = new NodeCache(client, sPath)
     l.getListenable.addListener(new NodeCacheListener {
       override def nodeChanged(): Unit = {
         queue.offer(Option(l.getCurrentData.getData))
