@@ -74,11 +74,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     bind [FrameworkIdStore] to new FrameworkIdStore
     bind [ConfigTemplates] to new ConfigTemplates
     bind [ActorSystem] to system
-    bind [AppConfiguration] to {
-      AppConfiguration(master = "hai", name = "ceph-test", principal = "ceph", secret = None, role = "ceph",
-        zookeeper = "zk://test", offerTimeout = 5.seconds, publicNetwork = "10.11.12.0/24",
-        clusterNetwork =  "10.11.12.0/24", storageBackend = "memory")
-    }
+    bind [AppConfiguration] to Workbench.newAppConfiguration()
+
   }
 
   def cephConfUpdates(implicit inj: Injector) = {
@@ -186,16 +183,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     val monLocation = ServiceLocation(hostname = "slave-12", ip = "10.11.12.12", port = 30125)
     val cluster = "ceph"
     val monitorTaskId = model.Job.makeTaskId(JobRole.Monitor, cluster)
-    val monitorTask = PersistentState(
-      id = UUID.randomUUID(),
-      cluster = "ceph",
-      role = JobRole.Monitor,
-      lastLaunched = Some(RunState.Running),
-      goal = Some(RunState.Running),
-      reservationConfirmed = true,
-      slaveId = Some("slave-12"),
-      reservationId = Some(UUID.randomUUID()),
-      taskId = Some(monitorTaskId),
+    val monitorTask = Workbench.newRunningMonitorJob(
+      taskId = monitorTaskId,
       location = monLocation)
 
     val module = new TestBindings {

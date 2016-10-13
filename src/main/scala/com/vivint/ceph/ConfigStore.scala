@@ -4,7 +4,6 @@ import akka.stream.scaladsl.{ Sink, Source }
 import org.slf4j.LoggerFactory
 import akka.stream.scaladsl.Flow
 import model.CephConfigHelper
-import java.nio.charset.StandardCharsets.UTF_8
 import scala.concurrent.{ ExecutionContext, Future }
 
 case class ConfigStore(kvStore: kvstore.KVStore) {
@@ -16,12 +15,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
 
     kvStore.get(configPath).flatMap {
       case None =>
-        import org.apache.commons.io.IOUtils
-        val f = getClass.getResourceAsStream("/deployment-config.conf")
-        val byteArray =
-          try { IOUtils.toByteArray(f) }
-          finally { f.close() }
-        kvStore.createOrSet(configPath, byteArray)
+        kvStore.createOrSet(configPath, ConfigStore.default)
       case Some(_) =>
         Future.successful(())
     }
@@ -30,7 +24,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
   val configParsingFlow = Flow[Option[Array[Byte]]].
     map {
       case Some(bytes) =>
-        try Some(CephConfigHelper.parse(new String(bytes, UTF_8)))
+        try Some(CephConfigHelper.parse(bytes))
         catch { case ex: Throwable =>
           log.error("Error parsing configuration", ex)
           None
@@ -47,7 +41,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
     kvStore.get(configPath).
       map {
         case Some(bytes) =>
-          CephConfigHelper.parse(new String(bytes, UTF_8))
+          CephConfigHelper.parse(bytes)
         case None =>
           throw new RuntimeException("No configuration detected")
       }(ExecutionContext.global)
@@ -55,4 +49,13 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
 
 
     // .map(CephConfigHelper.parse)
+}
+
+object ConfigStore {
+  lazy val default =  {
+    import org.apache.commons.io.IOUtils
+    val f = getClass.getResourceAsStream("/deployment-config.conf")
+    try { IOUtils.toByteArray(f) }
+    finally { f.close() }
+  }
 }

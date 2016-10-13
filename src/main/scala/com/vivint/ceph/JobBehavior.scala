@@ -207,12 +207,12 @@ class JobBehavior(
     }
   }
 
-
   case object MatchAndLaunchEphemeral extends Behavior {
     override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       if (state.goal.isEmpty)
         Transition(WaitForGoal{ (_,_) => MatchAndLaunchEphemeral})
-      else if (state.taskStatus.nonEmpty)
+      else if (state.lastLaunched.nonEmpty)
+        // If the task is dead, lost, or fails to return a status, EphemeralRunning will relaunch
         Transition(EphemeralRunning)
       else
         WantOffers
@@ -229,6 +229,7 @@ class JobBehavior(
             Persist(
               state.pState.copy(
                 slaveId = Some(pendingOffer.offer.getSlaveId.getValue),
+                lastLaunched = state.goal,
                 taskId = Some(newTaskId),
                 location = location
               )).

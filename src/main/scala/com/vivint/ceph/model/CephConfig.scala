@@ -4,6 +4,7 @@ import com.typesafe.config.{ Config, ConfigFactory, ConfigObject }
 import configs.FromString
 import mesosphere.marathon.state.DiskType
 import configs.syntax._
+import java.nio.charset.StandardCharsets.UTF_8
 
 
 case class MonDeploymentConfig(
@@ -100,4 +101,9 @@ settings {
     val config = ConfigFactory.parseString(str).withFallback(defaultConfig)
     config.extract[CephConfig].value
   }
+
+  def parse(bytes: Array[Byte]): CephConfig = {
+    parse(new String(bytes, UTF_8))
+  }
+
 }
