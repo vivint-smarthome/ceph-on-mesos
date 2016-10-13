@@ -28,6 +28,12 @@ class JobsState(log: LoggingAdapter) {
 
   def containsTaskId(taskId: String) = _tasks.values.exists(_.taskId.contains(taskId))
 
+  def getByReservationId(reservationId: UUID): Option[Job] =
+    _tasks.values.find(_.reservationId.contains(reservationId))
+
+  def containsReservationId(reservationId: UUID) =
+    _tasks.values.exists(_.reservationId.contains(reservationId))
+
   /** Given an updated task status, increments persistent state version if it has been changed. Calls all registered
     * subscribers.
     */

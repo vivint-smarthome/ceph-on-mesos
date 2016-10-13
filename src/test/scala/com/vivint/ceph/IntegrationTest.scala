@@ -162,7 +162,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
 
   def getTasks(implicit inj: Injector) = {
-    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetTasks).mapTo[Map[UUID, Job]])
+    await((inject[ActorRef](classOf[TaskActor]) ? TaskActor.GetJobs).mapTo[Map[UUID, Job]])
   }
 
   @tailrec final def pollTasks(duration: FiniteDuration, frequency: FiniteDuration = 50.millis)(
@@ -194,6 +194,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       goal = Some(RunState.Running),
       reservationConfirmed = true,
       slaveId = Some("slave-12"),
+      reservationId = Some(UUID.randomUUID()),
       taskId = Some(monitorTaskId),
       location = monLocation)
 
@@ -375,6 +376,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         role = "ceph",
         reservationLabels = Some(newLabels(
           Constants.FrameworkIdLabel -> MesosTestHelper.frameworkID.getValue,
+          Constants.ReservationIdLabel -> monitorTask.reservationId.get.toString,
           Constants.JobIdLabel -> monitorTask.id.toString))).
         build
 
@@ -470,7 +472,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
         ()
     }
 
-    val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetTasks).mapTo[Map[UUID, Job]]).
+    val (Seq(launchedTask), Seq(unlaunchedTask)) = await((taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, Job]]).
       values.
       partition(_.taskId == Some(launchedTaskId))
 
@@ -541,6 +543,33 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       rgwJobAfterLaunch.wantingNewOffer shouldBe true
 
       Thread.sleep(1000)
+    }
+  }
+
+  it("should update the slave ID and relaunch the task when the persistent offer slave-ID changes") {
+    new OneMonitorRunning {
+      import module.injector
+
+      val newSlaveReservedOffer = MesosTestHelper.makeBasicOffer(
+        slaveId = 409,
+        role = "ceph",
+        reservationLabels = Some(newLabels(
+          Constants.FrameworkIdLabel -> MesosTestHelper.frameworkID.getValue,
+          Constants.ReservationIdLabel -> monitorTask.reservationId.map(_.toString).get,
+          Constants.JobIdLabel -> monitorTask.id.toString))).
+        build
+
+      taskActor ! FrameworkActor.StatusUpdate(
+        newTaskStatus(monitorTask.taskId.get, monitorTask.slaveId.get, Protos.TaskState.TASK_KILLED))
+
+      taskActor ! FrameworkActor.ResourceOffers(List(newSlaveReservedOffer))
+
+      inside(gatherResponse(probe, newSlaveReservedOffer, ignoreRevive)) {
+        case offerResponse: FrameworkActor.AcceptOffer =>
+          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+      }
+
+      getTasks.apply(monitorTask.id).slaveId shouldBe (Some(newSlaveReservedOffer.getSlaveId.getValue))
     }
   }
 }

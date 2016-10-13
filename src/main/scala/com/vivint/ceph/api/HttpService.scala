@@ -45,7 +45,7 @@ class HttpService(implicit inj: Injector) {
     }
 
   def getTasks: Future[Map[UUID, model.Job]] =
-    (taskActor ? TaskActor.GetTasks).mapTo[Map[UUID, model.Job]]
+    (taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, model.Job]]
 
   def findTaskByUUID(id: UUID) =
     getTasks.map { _.values.find(_.id == id) }

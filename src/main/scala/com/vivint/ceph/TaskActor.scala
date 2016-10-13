@@ -21,7 +21,7 @@ import scaldi.Injector
 
 object TaskActor {
   sealed trait Command
-  case object GetTasks extends Command
+  case object GetJobs extends Command
   case class UpdateGoal(id: UUID, goal: RunState.EnumVal) extends Command
   case class JobTimer(id: UUID, timerName: String)
 
@@ -256,7 +256,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       r.reservation.
         flatMap(_.labels).
         map { labels =>
-          (labels.get(Constants.JobIdLabel).map(UUID.fromString), labels.get(Constants.FrameworkIdLabel))
+          (labels.get(Constants.ReservationIdLabel).map(UUID.fromString), labels.get(Constants.FrameworkIdLabel))
         }.
         getOrElse {
           (None, None)
@@ -267,12 +267,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     trying to grow in resources. That's not a supported use case right now. At the point it is supported, we can do
     mapping / grouping */
     val operations = reservedGroupings.map {
-      case ((Some(jobId), Some(OurFrameworkId())), resources)
-          if jobs.get(jobId).flatMap(_.slaveId).contains(offer.getSlaveId.getValue) =>
-        val task = jobs(jobId)
+      case ((Some(reservationId), Some(OurFrameworkId())), resources)
+          if jobs.containsReservationId(reservationId) =>
+        val job = jobs.getByReservationId(reservationId).get
         val pendingOffer = pendingOfferWithDeadline(offer.withResources(resources))
 
-        taskFSM.handleEvent(task, JobFSM.MatchedOffer(pendingOffer, None))
+        taskFSM.handleEvent(job, JobFSM.MatchedOffer(pendingOffer, None))
 
         pendingOffer.resultingOperations
 
@@ -280,7 +280,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         Future.successful(offerOperations.unreserveOffer(resources))
       case ((None, None), resources) =>
         val matchCandidateOffer = offer.withResources(resources)
-        val matchingTask = jobs.values.
+        val matchingJob = jobs.values.
           toStream.
           filter(_.readyForOffer).
           flatMap { task =>
@@ -291,12 +291,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           }.
           headOption
 
-        matchingTask match {
-          case Some((matchResult, task)) =>
+        matchingJob match {
+          case Some((matchResult, job)) =>
             // TODO - we need to do something with this result
             val pendingOffer = pendingOfferWithDeadline(matchCandidateOffer)
             taskFSM.handleEvent(
-              task.copy(wantingNewOffer = false),
+              job.copy(wantingNewOffer = false),
               JobFSM.MatchedOffer(pendingOffer, Some(matchResult)))
 
             pendingOffer.resultingOperations
@@ -340,7 +340,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     case cmd: Command =>
       cmd match {
-        case GetTasks =>
+        case GetJobs =>
           sender ! jobs.all
 
         case UpdateGoal(id, goal) =>

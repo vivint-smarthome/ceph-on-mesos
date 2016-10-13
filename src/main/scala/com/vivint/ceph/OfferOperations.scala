@@ -34,8 +34,8 @@ class OfferOperations(implicit inj: Injector) {
       newOfferOperation(newUnreserveOperation(resources)))
   }
 
-  def volId(jobId: UUID, containerPath: String): String =
-    jobId + "#" + containerPath
+  def volId(reservationId: UUID, containerPath: String): String =
+    reservationId + "#" + containerPath
 
   /** Adapated from Marathon code.
     * TODO - put appropriate copyright information
@@ -43,6 +43,7 @@ class OfferOperations(implicit inj: Injector) {
   def createVolumes(
     frameworkId: FrameworkID,
     jobId: UUID,
+    reservationId: UUID,
     localVolumes: Iterable[(DiskSource, PersistentVolume)]): Offer.Operation = {
     import scala.collection.JavaConverters._
 
@@ -50,7 +51,7 @@ class OfferOperations(implicit inj: Injector) {
       case (source, vol) =>
         val disk = {
           val persistence = Resource.DiskInfo.Persistence.newBuilder().
-            setId(volId(jobId = jobId, containerPath = vol.containerPath)).
+            setId(volId(reservationId = reservationId, containerPath = vol.containerPath)).
             setPrincipal(config.principal)
 
           val volume = Volume.newBuilder.
@@ -67,6 +68,7 @@ class OfferOperations(implicit inj: Injector) {
         val reservation = Resource.ReservationInfo.newBuilder.
           setLabels(newLabels(
             Constants.FrameworkIdLabel -> frameworkId.getValue,
+            Constants.ReservationIdLabel -> reservationId.toString,
             Constants.JobIdLabel -> jobId.toString)).
           setPrincipal(config.principal)
 
@@ -88,13 +90,15 @@ class OfferOperations(implicit inj: Injector) {
 
   /** Adapated from Marathon code.
     * TODO - put appropriate copyright information */
-  def reserve(frameworkId: FrameworkID, jobId: UUID, resources: Iterable[Resource]): Offer.Operation = {
+  def reserve(frameworkId: FrameworkID, jobId: UUID, reservationId: UUID, resources: Iterable[Resource]):
+      Offer.Operation = {
     import scala.collection.JavaConverters._
     val reservedResources = resources.map { resource =>
 
       val reservation = Resource.ReservationInfo.newBuilder().
         setLabels(newLabels(
             Constants.FrameworkIdLabel -> frameworkId.getValue,
+            Constants.ReservationIdLabel -> reservationId.toString,
             Constants.JobIdLabel -> jobId.toString)).
         setPrincipal(config.principal)
 
@@ -114,6 +118,7 @@ class OfferOperations(implicit inj: Injector) {
   def reserveAndCreateVolumes(
     frameworkId: FrameworkID,
     jobId: UUID,
+    reservationId: UUID,
     resourceMatch: ResourceMatcher.ResourceMatch): List[Offer.Operation] = {
 
     val localVolumes = resourceMatch.matches.
@@ -129,7 +134,15 @@ class OfferOperations(implicit inj: Injector) {
       distinct
 
     List(
-      reserve(frameworkId, jobId, resourceMatch.resources),
-      createVolumes(frameworkId, jobId, localVolumes))
+      reserve(
+        frameworkId,
+        jobId = jobId,
+        reservationId = reservationId,
+        resources = resourceMatch.resources),
+      createVolumes(
+        frameworkId,
+        jobId = jobId,
+        reservationId = reservationId,
+        localVolumes = localVolumes))
   }
 }

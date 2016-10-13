@@ -34,6 +34,7 @@ case class Job(
   def peers(p: Iterable[Job]): Iterable[Job] =
     p.filter { peer => (peer.role == this.role) && peer.id != this.id }
 
+  def reservationId = pState.reservationId
   def reservationConfirmed = pState.reservationConfirmed
   def goal = pState.goal
   def lastLaunched = pState.lastLaunched

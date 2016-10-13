@@ -98,20 +98,25 @@ class JobBehavior(
         case MatchedOffer(pendingOffer, matchResult) =>
           val resources = pendingOffer.offer.resources
           if (resources.forall { r => r.hasReservation }) {
-
             val newState = state.pState.copy(
               reservationConfirmed = true,
               slaveId = Some(pendingOffer.slaveId))
             Persist(newState) andAlso Hold(pendingOffer, matchResult) withTransition (Running)
           } else {
+            val reservationId = UUID.randomUUID()
             matchResult match {
               case Some(result) =>
                 OfferResponse(
                   pendingOffer,
-                  offerOperations.reserveAndCreateVolumes(frameworkId(), state.id, result)).
+                  offerOperations.reserveAndCreateVolumes(
+                    frameworkId(),
+                    jobId = state.id,
+                    reservationId = reservationId, resourceMatch = result)).
                   andAlso(
                     Persist(
-                      state.pState.copy(slaveId = Some(pendingOffer.slaveId)))).
+                      state.pState.copy(
+                        slaveId = Some(pendingOffer.slaveId),
+                        reservationId = Some(reservationId)))).
                   withTransition(WaitForReservation)
               case None =>
                 OfferResponse(pendingOffer, Nil) andAlso WantOffers
@@ -336,6 +341,7 @@ class JobBehavior(
               state.pState.copy(
                 location = taskLocation,
                 taskId = Some(newTaskId),
+                slaveId = Some(pendingOffer.offer.slaveId.get),
                 lastLaunched = state.goal))
 
             (state.role, state.pState.goal) match {

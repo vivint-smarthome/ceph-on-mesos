@@ -10,6 +10,7 @@ case class PersistentState(
   goal: Option[RunState.EnumVal] = None,
   lastLaunched: Option[RunState.EnumVal] = None,
   reservationConfirmed: Boolean = false,
+  reservationId: Option[UUID] = None,
   slaveId: Option[String] = None,
   taskId: Option[String] = None,
   location: Location = Location.empty) {
@@ -24,8 +25,10 @@ case class PersistentState(
     case _ => None
   }
 
-  if (reservationConfirmed)
-    require(slaveId.nonEmpty)
+  if (reservationConfirmed) {
+    require(slaveId.nonEmpty, "slaveId must be set if reservationConfirmed is set")
+    require(reservationId.nonEmpty, "reservationId must be set if reservationConfirmed is set")
+  }
 
   def resourcesReserved =
     slaveId.nonEmpty
