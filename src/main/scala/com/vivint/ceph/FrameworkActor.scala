@@ -85,10 +85,16 @@ class FrameworkActor(implicit val injector: Injector) extends Actor with ActorLo
         throw new TimeoutException("timed out while attempting to register framework with mesos")
       case r: Registered =>
         log.info("Registered! ID = " + r.frameworkId.getValue)
-        if (frameworkId.isEmpty) {
-          // It's pretty crucial that we don't continue if this fails
-          frameworkId = Some(r.frameworkId)
-          Await.result(frameworkStore.set(r.frameworkId), 30.seconds)
+        frameworkId match {
+          case None =>
+            // It's pretty crucial that we don't continue if this fails
+            frameworkId = Some(r.frameworkId)
+            Await.result(frameworkStore.set(r.frameworkId), 30.seconds)
+          case Some(frameworkId) if frameworkId != r.frameworkId =>
+            throw new RuntimeException(s"Framework launched with different value than that which was persisted. " +
+              s"${frameworkId.getValue} != ${r.frameworkId.getValue}. Cowardly refusing to proceed.")
+          case _ =>
+            ()
         }
 
         timeout.cancel()
