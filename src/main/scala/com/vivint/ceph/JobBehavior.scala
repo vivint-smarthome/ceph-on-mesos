@@ -442,14 +442,14 @@ class JobBehavior(
       offer = offer,
       location = taskLocation,
       templatesTgz = templatesTgz,
-      vars = Seq("MON_IP" -> taskLocation.ip, "MON_NAME" -> taskLocation.hostname),
+      env = Seq("MON_IP" -> taskLocation.ip, "MON_NAME" -> taskLocation.hostname),
       command =
         runState match {
           case RunState.Running =>
             s"""
             |sed -i "s/:6789/:${taskLocation.port}/g" /entrypoint.sh config.static.sh
             |${pullMonMapCommand}
-            |/entrypoint.sh mon
+            |exec /entrypoint.sh mon
             |""".stripMargin
           case RunState.Paused =>
             s"""
@@ -510,7 +510,7 @@ class JobBehavior(
             |mkdir -p /var/lib/ceph/osd/ceph-$${OSD_ID}
             |chown ceph:ceph /var/lib/ceph/osd/ceph-$${OSD_ID}
             |
-            |/entrypoint.sh osd_directory
+            |exec /entrypoint.sh osd_directory
             |""".stripMargin
           case RunState.Paused =>
             s"""
@@ -548,6 +548,7 @@ class JobBehavior(
       offer = offer,
       location = location,
       templatesTgz = templatesTgz,
+      env = Seq("RGW_CIVETWEB_PORT" -> port.toString),
       dockerArgs = cephConfig.deployment.rgw.docker_args,
       command =
             s"""
@@ -555,7 +556,7 @@ class JobBehavior(
             |echo "Pulling monitor map"
             |ceph mon getmap -o /etc/ceph/monmap-ceph
             |
-            |RGW_CIVETWEB_PORT=${port} /entrypoint.sh rgw
+            |exec /entrypoint.sh rgw
             |""".stripMargin
     )
 
@@ -566,7 +567,7 @@ class JobBehavior(
 
 
   private def launchCephCommand(taskId: String, jobId: UUID, role: JobRole.EnumVal, command: String,
-    offer: Protos.Offer, location: Location, vars: Seq[(String, String)] = Nil, templatesTgz: Array[Byte],
+    offer: Protos.Offer, location: Location, env: Seq[(String, String)] = Nil, templatesTgz: Array[Byte],
     dockerArgs: Map[String, String] = Map.empty) = {
     // We launch!
 
@@ -589,14 +590,14 @@ class JobBehavior(
           containerPath = "/var/lib/ceph",
           hostPath = "state/var"))
 
-    val env = newEnvironment(
+    val environment = newEnvironment(
       (Seq(
         "MESOS_TASK_ID" -> taskId,
         "CEPH_ROLE" -> role.name,
         "CEPH_PUBLIC_NETWORK" -> appConfig.publicNetwork,
         "CEPH_CONFIG_TGZ" -> Base64.getEncoder.encodeToString(templatesTgz))
         ++
-        vars) : _*)
+        env) : _*)
 
 
     val discovery = Protos.DiscoveryInfo.newBuilder.
@@ -633,7 +634,7 @@ class JobBehavior(
       setCommand(
         Protos.CommandInfo.newBuilder.
           setShell(true).
-          setEnvironment(env).
+          setEnvironment(environment).
           setValue(s"""
             |echo "$$CEPH_CONFIG_TGZ" | base64 -d | tar xz -C / --overwrite
             |${command}

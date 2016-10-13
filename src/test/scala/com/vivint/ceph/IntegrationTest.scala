@@ -344,7 +344,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           val List(task) = offerResponse.operations(0).getLaunch.tasks
           val shCommand = task.getCommand.getValue
           shCommand.contains("entrypoint.sh osd_directory") shouldBe true
-          val config = readConfig(task.getCommand.getEnvironment.get("CEPH_CONFIG_TGZ").get)
+          val config = readConfig(task.getCommand.environment("CEPH_CONFIG_TGZ"))
           val cephConfig = config("etc/ceph/ceph.conf")
           cephConfig.lines.filter(_.contains("ms_bind_port")).toList shouldBe List(
             "ms_bind_port_min = 31000",
@@ -524,7 +524,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           val dockerParams = task.getContainer.getDocker.params
           dockerParams("hostname") shouldBe ("le-docker.host.rgw")
           dockerParams("network") shouldBe ("weave")
-          shCommand.contains("RGW_CIVETWEB_PORT=80") shouldBe true
+          task.getCommand.environment("RGW_CIVETWEB_PORT") shouldBe ("80")
           shCommand.contains("entrypoint.sh rgw") shouldBe true
           (UUID.fromString(task.getLabels.get(Constants.JobIdLabel).get), task.getTaskId.getValue)
       }

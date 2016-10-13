@@ -199,6 +199,15 @@ object ProtoHelpers {
       setState(state).
       build
 
+  implicit class RichCommand(command: CommandInfo) {
+    implicit def environment: Map[String, String] = {
+      if (command.hasEnvironment)
+        command.getEnvironment.toMap
+      else
+        Map.empty
+    }
+  }
+
   implicit class RichOffer(offer: Offer) {
     def resources =
       offer.getResourcesList.toList
