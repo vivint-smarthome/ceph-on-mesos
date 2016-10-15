@@ -279,7 +279,7 @@ class JobBehavior(
       case JobUpdated(_) =>
         decideWhatsNext(state)
       case Timer("timeout") =>
-        if (state.taskState.isEmpty) {
+        if (state.taskState.isEmpty || state.taskState.exists(_.isInstanceOf[TaskState.Limbo])) {
           // task failed to launch. Try again.
           relaunch(state)
         } else {

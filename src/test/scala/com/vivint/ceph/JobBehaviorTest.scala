@@ -1,7 +1,7 @@
 package com.vivint.ceph
 
-import com.vivint.ceph.Directives.{ Directive, OfferResponse, SetBehaviorTimer }
-import com.vivint.ceph.model.{ CephConfigHelper, ClusterSecrets, Job, RunState }
+import com.vivint.ceph.Directives.{ Directive, OfferResponse, Persist, SetBehaviorTimer }
+import com.vivint.ceph.model.{ CephConfigHelper, ClusterSecrets, Job, RunState, TaskState, Location }
 import org.scalatest.{ FunSpec, Inside, Matchers }
 import scaldi.Module
 
@@ -43,7 +43,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
         rgwJob.behavior.handleEvent(JobFSM.MatchedOffer(pendingOffer, None), rgwJob, Map.empty)
 
       inside(persistAction) {
-        case Directives.Persist(data) =>
+        case Persist(data) =>
           data.taskId.isEmpty shouldBe false
           data.lastLaunched shouldBe Some(RunState.Running)
           data.slaveId.isEmpty shouldBe false
@@ -55,6 +55,32 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
       }
 
       transition shouldBe jobBehavior.EphemeralRunning
+    }
+
+    it("relaunches tasks that are TASK_LOST after timeout") {
+      val rgwJob = Job.fromState(
+        Workbench.newRunningRGWJob(),
+        jobBehavior.defaultBehavior)
+
+      val Directive(Nil, Some(nextBehavior)) = rgwJob.behavior.preStart(rgwJob, Map.empty)
+
+      nextBehavior shouldBe jobBehavior.EphemeralRunning
+
+      val Directive(List(SetBehaviorTimer(timerId, _)), None) = nextBehavior.preStart(rgwJob, Map.empty)
+
+      val taskLost = rgwJob.copy(taskState = Some(TaskState.TaskLost))
+
+      val Directive(Nil, None) = nextBehavior.handleEvent(JobFSM.JobUpdated(rgwJob), taskLost, Map.empty)
+
+      val Directive(List(Persist(relaunchState)), Some(relaunchBehavior)) =
+        nextBehavior.handleEvent(JobFSM.Timer(timerId), taskLost, Map.empty)
+
+      relaunchState.taskId shouldBe None
+      relaunchState.slaveId shouldBe None
+      relaunchState.location shouldBe Location.empty
+
+      relaunchBehavior shouldBe jobBehavior.MatchAndLaunchEphemeral
+
     }
   }
 }
