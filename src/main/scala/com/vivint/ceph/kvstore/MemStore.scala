@@ -85,7 +85,7 @@ class MemStore extends KVStore {
   def lock(path: String): Future[KVStore.CancellableWithResult] = Future {
     val lockFile = fileFor(path)
     if (state.contains(lockFile)) {
-      throw new RuntimeException("Coudln't acquire lock in memory lock")
+      throw new RuntimeException("Couldn't acquire lock in memory lock")
     }
 
     state = state.updated(lockFile, Array.empty)
@@ -93,7 +93,10 @@ class MemStore extends KVStore {
     val p = Promise[Done]
     new KVStore.CancellableWithResult {
       def result = p.future
-      def cancel(): Boolean = { p.trySuccess(Done); true }
+      def cancel(): Boolean = {
+        delete(path)
+        p.trySuccess(Done); true
+      }
       def isCancelled = p.isCompleted
     }
   }

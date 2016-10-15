@@ -239,7 +239,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
   }
 
-  def pendingOfferWithDeadline(offer: Protos.Offer, deadline:FiniteDuration = 5.seconds): PendingOffer = {
+  def pendingOfferWithDeadline(offer: Protos.Offer): PendingOffer = {
+    val deadline = config.offerTimeout / 6
     val pendingOffer = PendingOffer(offer)
     context.system.scheduler.scheduleOnce(deadline) {
       pendingOffer.resultingOperationsPromise.trySuccess(Nil)
@@ -317,10 +318,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           jobs.updateJob(job.withTaskStatus(taskStatus))
         case None =>
           if (TaskState.fromMesos(taskStatus.getState).isInstanceOf[TaskState.Active]) {
-            log.info("Received running task status update for unknown taskId {}; killing", taskStatus.getTaskId.getValue)
+            log.info("Received running task status update for unknown taskId {}; killing",
+              taskStatus.getTaskId.getValue)
             frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
           }
-
       }
 
     case FrameworkActor.ResourceOffers(offers) =>
