@@ -1,3 +1,5 @@
+import java.util.Properties
+
 val akkaVersion = "2.4.11"
 val mesosVersion = "1.0.0"
 val curatorVer = "2.11.0"
@@ -8,12 +10,17 @@ val commonSettings = Seq(
   scalaVersion := "2.11.8"
 )
 
+val appProperties = {
+  val prop = new Properties()
+  IO.load(prop, new File("project/version.properties"))
+  prop
+}
 lazy val root = (project in file(".")).
   settings(
     commonSettings : _*).
   settings(
     name := "ceph-on-mesos",
-
+    version := appProperties.getProperty("version"),
     resolvers += "Mesosphere Public Repo" at "http://downloads.mesosphere.com/maven",
 
     libraryDependencies ++= Seq(
