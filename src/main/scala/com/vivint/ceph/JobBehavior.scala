@@ -211,7 +211,7 @@ class JobBehavior(
     override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
       if (state.goal.isEmpty)
         Transition(WaitForGoal{ (_,_) => MatchAndLaunchEphemeral})
-      else if (state.lastLaunched.nonEmpty)
+      else if (state.taskId.nonEmpty)
         // If the task is dead, lost, or fails to return a status, EphemeralRunning will relaunch
         Transition(EphemeralRunning)
       else
