@@ -2,10 +2,7 @@
 
 ## definitely
 
-- [ ] Packaging
-- [ ] Mesos DNS discovery / srv records
 - [ ] Simple web UI
-- [ ] Configurable secret to protect access to pull ceph config
 - [ ] Permissive resource releases. It would be better that a bug result in resources not being released, than release
       resources that shouldn't be released.
 - [ ] Health checks. Leader launch pattern should wait for leader node to return successful health before launching other
@@ -19,9 +16,12 @@
 ## maybe
 
 - [ ] Consider supporting non-XFS file systems by allocating contiguous blocks.
+- [ ] Configurable secret to protect access to pull ceph config
 
 ## done
 
+- [x] Packaging
+- [x] Mesos DNS discovery / srv records
 - [x] Exclusive lock. It would be castostrophic if two ceph-on-mesos frameworks launched concurrently.
 - [x] Extract leader launch pattern into orchestrator
 - [x] Simple API endpoints to pull configuration necessary to connect to ceph.
