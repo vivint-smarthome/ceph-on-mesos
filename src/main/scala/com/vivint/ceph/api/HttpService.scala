@@ -44,20 +44,20 @@ class HttpService(implicit inj: Injector) {
         complete((400, s"Error parsing: ${ex.getMessage}"))
     }
 
-  def getTasks: Future[Map[UUID, model.Job]] =
+  def getJobs: Future[Map[UUID, model.Job]] =
     (taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, model.Job]]
 
-  def findTaskByUUID(id: UUID) =
-    getTasks.map { _.values.find(_.id == id) }
+  def findJobByUUID(id: UUID) =
+    getJobs.map { _.values.find(_.id == id) }
 
   def getConfig: Future[String] = {
     tSequence(
       ClusterSecretStore.createOrGenerateSecrets(kvStore),
       ConfigStore(kvStore).get,
-      getTasks).map {
-      case (secrets, cfg, tasks) =>
+      getJobs).map {
+      case (secrets, cfg, jobs) =>
         val monitors: Set[ServiceLocation] =
-          tasks.values.filter(_.role == JobRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
+          jobs.values.filter(_.role == JobRole.Monitor).flatMap(_.pState.serviceLocation)(breakOut)
         configTemplates.cephConf(secrets, monitors, cfg.settings, None)
     }
   }
@@ -67,19 +67,19 @@ class HttpService(implicit inj: Injector) {
     path("config" / "ceph.conf") {
       complete(getConfig)
     } ~
-    pathPrefix("tasks") {
+    pathPrefix("jobs") {
       (pathEnd & get) {
-        onSuccess(getTasks) { tasks =>
-          complete(tasks.values.toList)
+        onSuccess(getJobs) { jobs =>
+          complete(jobs.values.toList)
         }
       } ~
       (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
-        onSuccess(findTaskByUUID(id)) {
-          case Some(task) =>
-            taskActor ! TaskActor.UpdateGoal(task.id, runState)
-            complete(s"Task ID ${task.taskId} state change submitted: ${task.goal} -> ${Some(runState)}")
+        onSuccess(findJobByUUID(id)) {
+          case Some(job) =>
+            taskActor ! TaskActor.UpdateGoal(job.id, runState)
+            complete(s"Job ID ${job.id} state change submitted: ${job.goal} -> ${Some(runState)}")
           case None =>
-            complete((400, s"Couldn't find task with UUID ${id}."))
+            complete((400, s"Couldn't find job with UUID ${id}."))
         }
       }
     }
