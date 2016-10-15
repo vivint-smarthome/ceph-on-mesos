@@ -13,6 +13,7 @@ case class MonDeploymentConfig(
   mem: Double,
   disk_type: DiskType,
   disk: Long,
+  path_constraint: Option[String],
   max_per_host: Int
 )
 

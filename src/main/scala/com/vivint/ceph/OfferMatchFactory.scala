@@ -1,12 +1,14 @@
 package com.vivint.ceph
 
 import java.util.UUID
+import mesosphere.marathon.Protos.Constraint
+import mesosphere.marathon.Protos.Constraint.Operator
 import mesosphere.marathon.state.{ PersistentVolume, PersistentVolumeInfo, DiskType }
 import mesosphere.mesos.matcher.{ DiskResourceMatcher, ResourceMatcher, ScalarMatchResult, ScalarResourceMatcher }
 import mesosphere.mesos.protos.Resource.{CPUS, MEM, DISK, PORTS}
 import org.apache.mesos.Protos
 import com.vivint.ceph.model.{ CephConfig, Job, JobRole }
-import OfferMatchFactory.{OfferMatcher, getPeers, peersAssignedToSlave}
+import OfferMatchFactory.{OfferMatcher, getPeers, peersAssignedToSlave, newPathConstraints}
 import scaldi.Injector
 import scaldi.Injectable._
 
@@ -24,6 +26,18 @@ object OfferMatchFactory {
     peers.map(_.pState.slaveId).collect {
       case Some(peerSlaveId) if peerSlaveId == offerSlaveId => 1
     }.length
+  }
+
+  def newPathConstraints(matcherOpt: Option[String]): Set[Constraint] = matcherOpt match {
+    case Some(matcher) =>
+      Set(
+        Constraint.newBuilder.
+          setField("path").
+          setOperator(Operator.LIKE).
+          setValue(matcher).
+          build)
+    case None =>
+      Set.empty
   }
 }
 
@@ -71,6 +85,7 @@ class OSDOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
       "state",
       PersistentVolumeInfo(
         osdConfig.disk,
+        constraints = newPathConstraints(cephConfig.deployment.osd.path_constraint),
         `maxSize` = osdConfig.disk_max.filter(_ => osdConfig.disk_type == DiskType.Mount),
         `type` = cephConfig.deployment.osd.disk_type),
       Protos.Volume.Mode.RW)
@@ -106,6 +121,7 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
       "state",
       PersistentVolumeInfo(
         cephConfig.deployment.mon.disk,
+        constraints = newPathConstraints(cephConfig.deployment.mon.path_constraint),
         `type` = cephConfig.deployment.mon.disk_type),
       Protos.Volume.Mode.RW)
 
