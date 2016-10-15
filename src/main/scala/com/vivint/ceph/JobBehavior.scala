@@ -259,7 +259,7 @@ class JobBehavior(
       if (state.slaveId.isEmpty)
         throw new IllegalStateException(s"Can't be EphemeralRunning without a slaveId")
 
-      SetBehaviorTimer("timeout", 60.seconds) andAlso decideWhatsNext(state)
+      decideWhatsNext(state)
     }
 
     def relaunch(state:Job): Directive =
@@ -270,6 +270,8 @@ class JobBehavior(
       state.taskState match {
         case Some(_: TaskState.Terminal) =>
           relaunch(state)
+        case None | Some(_: TaskState.Limbo) =>
+          SetBehaviorTimer("timeout", 60.seconds)
         case other =>
           Stay
       }

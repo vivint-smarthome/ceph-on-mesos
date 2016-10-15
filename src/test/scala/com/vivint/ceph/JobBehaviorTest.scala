@@ -70,7 +70,8 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
 
       val taskLost = rgwJob.copy(taskState = Some(TaskState.TaskLost))
 
-      val Directive(Nil, None) = nextBehavior.handleEvent(JobFSM.JobUpdated(rgwJob), taskLost, Map.empty)
+      val Directive(List(SetBehaviorTimer(`timerId`, _)), None) =
+        nextBehavior.handleEvent(JobFSM.JobUpdated(rgwJob), taskLost, Map.empty)
 
       val Directive(List(Persist(relaunchState)), Some(relaunchBehavior)) =
         nextBehavior.handleEvent(JobFSM.Timer(timerId), taskLost, Map.empty)

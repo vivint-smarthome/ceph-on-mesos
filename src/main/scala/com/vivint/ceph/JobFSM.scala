@@ -44,6 +44,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
 
   private def setBehaviorTimer(job: Job, timerName: TimerName, duration: FiniteDuration): Unit = {
     val timers = jobTimers(job.id)
+    timers.get(timerName).foreach(_.cancel())
     timers(timerName) = setTimer(job.id, timerName, duration)
   }
 
