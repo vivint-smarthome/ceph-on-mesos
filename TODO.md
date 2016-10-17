@@ -3,7 +3,6 @@
 ## definitely
 
 - [ ] Simple web UI
-- [ ] Configurable ceph-docker image, allowing local / private repository to be used.
 - [ ] Permit OSD btrfs deployment
 - [ ] Permissive resource releases. It would be better that a bug result in resources not being released, than release
       resources that shouldn't be released.
@@ -24,6 +23,7 @@
 
 ## done
 
+- [x] Configurable ceph-docker image, allowing local / private repository to be used.
 - [x] Packaging
 - [x] Mesos DNS discovery / srv records [0.2.0]
 - [x] Exclusive lock. It would be castostrophic if two ceph-on-mesos frameworks launched concurrently. [0.1.0]
@@ -36,8 +36,7 @@
 - [x] Extract task state tracking from TaskActor. Guard operations.
 - [x] Emit TaskChanged messages as part of nodeupdated; concern too scattered.
 - [x] extract TaskFSM concerns from TaskActor.
-- [ ] Extract launch strategy from node behavior.
-- [ ] Extract common behaviors into it's own library.
+- [ ] Extract launch strategy from node behavior and extract common behaviors into it's own library.
 - [ ] Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
       lastLaunched changed.
 

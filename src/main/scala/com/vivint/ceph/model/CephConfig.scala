@@ -40,7 +40,8 @@ case class RGWDeploymentConfig(
 case class DeploymentConfig(
   mon: MonDeploymentConfig,
   osd: OSDDeploymentConfig,
-  rgw: RGWDeploymentConfig
+  rgw: RGWDeploymentConfig,
+  docker_image: String
 )
 
 case class CephSettings(
@@ -61,6 +62,8 @@ case class CephConfig(
 object CephConfigHelper {
   val defaultConfig = ConfigFactory.parseString("""
 deployment {
+  docker_image = "ceph/daemon:tag-build-master-jewel-ubuntu-14.04"
+
   mon {
     disk_type = root
     disk = 16

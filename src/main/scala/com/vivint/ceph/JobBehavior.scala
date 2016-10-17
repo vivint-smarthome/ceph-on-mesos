@@ -579,7 +579,7 @@ class JobBehavior(
       setType(Protos.ContainerInfo.Type.DOCKER).
       setDocker(
         Protos.ContainerInfo.DockerInfo.newBuilder.
-          setImage("ceph/daemon:tag-build-master-jewel-ubuntu-14.04").
+          setImage(deploymentConfig().deployment.docker_image).
           setNetwork(Protos.ContainerInfo.DockerInfo.Network.HOST).
           setForcePullImage(true).
           addAllParameters(dockerParameters.asJava)
