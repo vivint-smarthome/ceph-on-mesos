@@ -23,7 +23,7 @@ object TaskActor {
   sealed trait Command
   case object GetJobs extends Command
   case class UpdateGoal(id: UUID, goal: RunState.EnumVal) extends Command
-  case class JobTimer(id: UUID, timerName: String)
+  case class JobTimer(id: UUID, timerName: String, behavior: Behavior)
 
   val log = LoggerFactory.getLogger(getClass)
 }
@@ -136,10 +136,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       _taskFSM = new JobFSM(jobs,
         log = log,
         behaviorSet = behaviorSet,
-        setTimer = { (jobId, timerName, duration) =>
+        setTimer = { (job, timerName, duration) =>
           import context.dispatcher
           context.system.scheduler.scheduleOnce(duration) {
-            self ! JobTimer(jobId, timerName)
+            self ! JobTimer(job.id, timerName, job.behavior)
           }},
         revive = { () => throttledRevives.offer(()) },
         killTask = { (taskId: String) =>
@@ -362,8 +362,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
       applyConfiguration()
     case ConfigUpdate(None) =>
       log.warning("Ceph config went missing / unparseable. Changes not applied")
-    case JobTimer(id, timerName) =>
-      taskFSM.onTimer(id, timerName)
+    case JobTimer(id, timerName, behavior) =>
+      taskFSM.onTimer(id, timerName, behavior)
     case PersistSuccess(id, version) =>
       jobs.updatePersistence(id, version)
   }

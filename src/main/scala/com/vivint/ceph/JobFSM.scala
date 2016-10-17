@@ -26,7 +26,7 @@ object JobFSM {
 }
 
 class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
-  setTimer: (UUID, String, FiniteDuration) => Cancellable,
+  setTimer: (Job, String, FiniteDuration) => Cancellable,
   revive: () => Unit,
   killTask: (String => Unit)
 ) {
@@ -34,8 +34,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   type JobId = UUID
   type TimerName = String
   import scala.collection.mutable
-  private val jobTimers = mutable.Map.empty[JobId, mutable.Map[TimerName, Cancellable]].
-    withDefaultValue(mutable.Map.empty)
+  private val jobTimers = mutable.Map.empty[JobId, mutable.Map[TimerName, Cancellable]]
 
   jobs.addSubscriber {
     case (Some(before), Some(after)) =>
@@ -43,29 +42,34 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   }
 
   private def setBehaviorTimer(job: Job, timerName: TimerName, duration: FiniteDuration): Unit = {
-    val timers = jobTimers(job.id)
+    val timers = jobTimers.get(job.id).getOrElse {
+      jobTimers(job.id) = mutable.Map.empty
+      jobTimers(job.id)
+    }
+
     timers.get(timerName).foreach(_.cancel())
-    timers(timerName) = setTimer(job.id, timerName, duration)
+    timers(timerName) = setTimer(job, timerName, duration)
   }
 
   private def clearTimers(job: Job): Unit =
     jobTimers.
       remove(job.id).
       getOrElse(mutable.Map.empty).
-      foreach { case (_, cancellable) =>
+      foreach { case (id, cancellable) =>
         cancellable.cancel()
       }
 
-  def onTimer(jobId: JobId, timerName: TimerName): Unit = {
+  def onTimer(jobId: JobId, timerName: TimerName, behavior: Behavior): Unit =
     for {
       cancellable <- jobTimers(jobId).remove(timerName)
       job <- jobs.get(jobId)
+      if behavior == job.behavior
     } {
       cancellable.cancel() // just in case it was manually invoked?
       log.debug("Timer {} for jobId {} fired", timerName, jobId)
       handleEvent(job, JobFSM.Timer(timerName))
     }
-  }
+
 
   private def processEvents(job: Job, events: List[JobFSM.Event]): Job = events match {
     case event :: rest =>
