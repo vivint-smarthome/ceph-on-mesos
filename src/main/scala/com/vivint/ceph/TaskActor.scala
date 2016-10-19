@@ -295,7 +295,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         matchingJob match {
           case Some((matchResult, job)) =>
             // TODO - we need to do something with this result
-            val pendingOffer = pendingOfferWithDeadline(matchCandidateOffer)
+            val pendingOffer = pendingOfferWithDeadline(matchCandidateOffer.withResources(matchResult.resources))
             taskFSM.handleEvent(
               job.copy(wantingNewOffer = false),
               JobFSM.MatchedOffer(pendingOffer, Some(matchResult)))

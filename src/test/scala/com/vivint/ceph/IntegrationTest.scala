@@ -489,6 +489,8 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
       updateConfig("""
         |deployment.rgw {
         |  count = 1
+        |  cpus = 0.5
+        |  mem = 128
         |  port = 80
         |  docker_args {
         |    hostname = "le-docker.host.rgw"
@@ -506,10 +508,13 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
       val (rgwJobId, launchedTaskId) = inside(gatherResponse(probe, offer, ignoreRevive)) {
         case offerResponse: FrameworkActor.AcceptOffer =>
-          offerResponse.operations(0).getType shouldBe Protos.Offer.Operation.Type.LAUNCH
-          val List(task) = offerResponse.operations(0).getLaunch.tasks
-          val shCommand = task.getCommand.getValue
+          val List(launchOp) = offerResponse.operations.toList
+          launchOp.getType shouldBe Protos.Offer.Operation.Type.LAUNCH
+          val List(task) = launchOp.getLaunch.tasks
+          task.getResourcesList.filter(_.getName == CPUS)(0).getScalar.getValue shouldBe 0.5
+          task.getResourcesList.filter(_.getName == MEM)(0).getScalar.getValue shouldBe 128.0
 
+          val shCommand = task.getCommand.getValue
           val dockerParams = task.getContainer.getDocker.params
           dockerParams("hostname") shouldBe ("le-docker.host.rgw")
           dockerParams("network") shouldBe ("weave")
