@@ -90,3 +90,75 @@ lazy val marathon = (project in file("marathon-submodule/")).
       baseDirectory.value / "marathon/src/main/scala/mesosphere/mesos/"
     )
   )
+
+val scalaJSReactVersion = "0.11.2"
+val scalaCssVersion = "0.5.0"
+val reactJSVersion = "15.3.2"
+
+
+val uiBuildPath = file("ui") / "js"
+lazy val ui = (project in file("ui")).
+  enablePlugins(ScalaJSPlugin).
+  settings(
+    commonSettings: _*).
+  settings(
+    resolvers += "mmreleases" at "https://artifactory.mediamath.com/artifactory/libs-release-global",
+    libraryDependencies ++= Seq("com.github.japgolly.scalajs-react" %%% "core" % scalaJSReactVersion,
+      "com.github.japgolly.scalajs-react" %%% "extra" % scalaJSReactVersion,
+      "com.github.japgolly.scalacss" %%% "core" % scalaCssVersion,
+      "com.github.japgolly.scalacss" %%% "ext-react" % scalaCssVersion,
+      "com.github.chandu0101.scalajs-react-components" %%% "core" % "0.5.0",
+      "com.mediamath" %%% "scala-json" % "1.0"),
+
+
+    // React JS itself (Note the filenames, adjust as needed, eg. to remove addons.)
+    jsDependencies ++= Seq(
+
+      "org.webjars.bower" % "react-bootstrap" % "0.30.3"
+        /        "react-bootstrap.js"
+        minified "react-bootstrap.min.js"
+        dependsOn "react-with-addons.js"
+        commonJSName "ReactBootstrap",
+
+      "org.webjars.bower" % "react" % reactJSVersion
+        /        "react-with-addons.js"
+        minified "react-with-addons.min.js"
+        commonJSName "React",
+
+      "org.webjars.bower" % "react" % reactJSVersion
+        /         "react-dom.js"
+        minified  "react-dom.min.js"
+        dependsOn "react-with-addons.js"
+        commonJSName "ReactDOM",
+
+      "org.webjars.bower" % "react" % reactJSVersion
+        /         "react-dom-server.js"
+        minified  "react-dom-server.min.js"
+        dependsOn "react-dom.js"
+        commonJSName "ReactDOMServer"),
+
+
+    // create launcher file ( its search for object extends JSApp , make sure there is only one file)
+    persistLauncher := true,
+
+    persistLauncher in Test := false,
+
+    skip in packageJSDependencies := false,
+
+    crossTarget in (Compile, fullOptJS) := uiBuildPath,
+
+    crossTarget in (Compile, fastOptJS) := uiBuildPath,
+
+    crossTarget in (Compile, packageJSDependencies) := uiBuildPath,
+
+    crossTarget in (Compile, packageScalaJSLauncher) := uiBuildPath,
+
+    crossTarget in (Compile, packageMinifiedJSDependencies) := uiBuildPath,
+
+    artifactPath in (Compile, fastOptJS) := ((crossTarget in (Compile, fastOptJS)).value /
+      ((moduleName in fastOptJS).value + "-opt.js")),
+
+    scalacOptions += "-feature"
+  ).
+  dependsOn(
+    ProjectRef(uri("git://github.com/timcharper/scalajs-react-bridge.git"), "scalajs-react-bridge"))

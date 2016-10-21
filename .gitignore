@@ -8,3 +8,5 @@ scratch
 *.DS_Store
 target
 libmesos.dylib
+
+ui/js/
