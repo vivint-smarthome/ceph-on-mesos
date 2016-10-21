@@ -9,6 +9,9 @@ import scalacss.Defaults._
 import scala.scalajs.js
 import scalacss.ScalaCssReact._
 import org.scalajs.dom
+import models.Job
+import json._
+import models.JsFormats._
 
 object HomePage {
 
@@ -20,30 +23,17 @@ object HomePage {
       paddingTop(40.px))
   }
 
-  import json._
-  import models.JsFormats._
 
-  // val jobs = JValue.fromString(dataJson).toObject[Seq[models.Job]]
-
-  // dom.window.console.log(jobs.toString)
-
-  val losItems = ReactComponentB[Seq[models.Job]]("Jobs").
+  val losItems = ReactComponentB[Seq[Job]]("Jobs").
     render_P { jobs =>
       <.div(
         jobs.map(_.id))
     }.
     build
 
-  // val component = ReactComponentB.static("HomePage",
-  //   <.div(Style.content, "ScalaJS-React Template ")
-  // ).buildU
+  case class State(jobs: Seq[Job], expanded: Set[String] = Set.empty)
 
-  // def apply(jobs: Seq[models.Job],
-  //   ref: js.UndefOr[String] = "", key: js.Any = {}) = losItems.set(key, ref)(data)
-
-  case class State(jobs: Seq[models.Job], expanded: Set[String] = Set.empty)
-
-  import elements.{Table, Grid, Row, Accordion, Panel, Col, Button}
+  import elements.{Table, Grid, Row, Col, Button}
   def renderLocation(jobId: String, location: models.Location): ReactNode = {
     val portSuffix = location.port.map(p => s":${p}").getOrElse("")
 
@@ -70,7 +60,7 @@ object HomePage {
       xhr.open("GET", "/v1/jobs")
       xhr.onload = { (e: dom.Event) =>
         if (xhr.status == 200) {
-          val jobs = JValue.fromString(xhr.responseText).toObject[Seq[models.Job]]
+          val jobs = JValue.fromString(xhr.responseText).toObject[Seq[Job]]
           $.modState { ste =>
             State(jobs, ste.expanded)
           }.runNow()
@@ -96,6 +86,19 @@ object HomePage {
       dom.console.log("le end")
       running = false
     }
+
+    def setGoal(job: Job, state: String): Unit = {
+      val xhr = new dom.XMLHttpRequest()
+      xhr.open("PUT", s"/v1/jobs/${job.id}/${state}")
+      xhr.onload = { (e: dom.Event) =>
+        if (xhr.status == 200)
+          dom.console.log(s"transition job ${job.id} to ${state} success")
+        else
+          dom.console.log(s"transition job ${job.id} to ${state} failed", xhr.responseText)
+      }
+      xhr.send()
+    }
+
 
     def render(s: State) =
       <.div(
@@ -144,9 +147,13 @@ object HomePage {
                                 xs = 4)(
                                 job.goal match {
                                   case Some("running") =>
-                                    Button(bsStyle = "warning")("Pause")
+                                    Button(bsStyle = "warning",
+                                      onClick = { () => setGoal(job, "paused") })(
+                                      "Pause")
                                   case Some("paused") =>
-                                    Button(bsStyle = "success")("Run")
+                                    Button(bsStyle = "success",
+                                      onClick = { () => setGoal(job, "running") })(
+                                      "Run")
                                   case _ =>
                                     <.span()
                                 }
@@ -156,19 +163,6 @@ object HomePage {
                   }
                 )
               )
-              // Accordion()(
-              //   roleJobs.sortBy(_.id).map { job =>
-              //     val header: ReactNode =
-              //       Grid()(
-              //         Row()(
-              //           Col(md = 1)(s"id: ${job.id.take(7)}"),
-              //           Col(md = 1)(renderLocation(job.id, job.location))
-              //         ))
-
-              //     Panel(header = header, key = job.id, eventKey = job.id)(
-              //       job.slaveId.getOrElse[String](""))
-              //   }
-              // )
             )
 
         }
