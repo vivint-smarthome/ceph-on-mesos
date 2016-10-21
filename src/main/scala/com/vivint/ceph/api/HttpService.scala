@@ -62,24 +62,32 @@ class HttpService(implicit inj: Injector) {
     }
   }
 
-  def route = pathPrefix("v1") {
-    // TODO - protect with key
-    path("config" / "ceph.conf") {
-      complete(getConfig)
+  def route = {
+    path("" | "index.html") {
+      getFromResource("ui/index.html")
     } ~
-    pathPrefix("jobs") {
-      (pathEnd & get) {
-        onSuccess(getJobs) { jobs =>
-          complete(jobs.values.toList)
-        }
+    pathPrefix("js") {
+      getFromResourceDirectory("ui/js")
+    } ~
+    pathPrefix("v1") {
+      // TODO - protect with key
+      path("config" / "ceph.conf") {
+        complete(getConfig)
       } ~
-      (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
-        onSuccess(findJobByUUID(id)) {
-          case Some(job) =>
-            taskActor ! TaskActor.UpdateGoal(job.id, runState)
-            complete(s"Job ID ${job.id} state change submitted: ${job.goal} -> ${Some(runState)}")
-          case None =>
-            complete((400, s"Couldn't find job with UUID ${id}."))
+      pathPrefix("jobs") {
+        (pathEnd & get) {
+          onSuccess(getJobs) { jobs =>
+            complete(jobs.values.toList)
+          }
+        } ~
+          (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
+          onSuccess(findJobByUUID(id)) {
+            case Some(job) =>
+              taskActor ! TaskActor.UpdateGoal(job.id, runState)
+              complete(s"Job ID ${job.id} state change submitted: ${job.goal} -> ${Some(runState)}")
+            case None =>
+              complete((400, s"Couldn't find job with UUID ${id}."))
+          }
         }
       }
     }
