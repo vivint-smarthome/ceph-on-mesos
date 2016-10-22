@@ -50,10 +50,11 @@ class HttpService(implicit inj: Injector) {
   def findJobByUUID(id: UUID) =
     getJobs.map { _.values.find(_.id == id) }
 
+  val configStore = ConfigStore(kvStore)
   def getConfig: Future[String] = {
     tSequence(
       ClusterSecretStore.createOrGenerateSecrets(kvStore),
-      ConfigStore(kvStore).get,
+      configStore.get,
       getJobs).map {
       case (secrets, cfg, jobs) =>
         val monitors: Set[ServiceLocation] =
@@ -71,8 +72,20 @@ class HttpService(implicit inj: Injector) {
     } ~
     pathPrefix("v1") {
       // TODO - protect with key
-      path("config" / "ceph.conf") {
-        complete(getConfig)
+      pathPrefix("config") {
+        path("ceph.conf") {
+          complete(getConfig)
+        } ~
+        path("deployment-config.conf") {
+          get {
+            complete(configStore.getText)
+          } ~
+          (put & entity(as[String])) { cfg =>
+            onSuccess(configStore.storeText(cfg)) {
+              complete("ok")
+            }
+          }
+        }
       } ~
       pathPrefix("jobs") {
         (pathEnd & get) {

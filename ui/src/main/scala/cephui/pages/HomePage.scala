@@ -11,7 +11,12 @@ import scalacss.ScalaCssReact._
 import org.scalajs.dom
 import models.Job
 import json._
+import scala.concurrent.duration._
+import scala.concurrent.{Future,Promise}
+import scala.concurrent.ExecutionContext.Implicits.global
 import models.JsFormats._
+import lib.Http
+import scala.util.{Success, Failure}
 
 object HomePage {
 
@@ -52,29 +57,26 @@ object HomePage {
   val `data-toggle` = "data-toggle".reactAttr
   val `data-target` = "data-target".reactAttr
 
+  implicit val jobsDeserializer = new Http.Unmarshaller[Seq[Job]] {
+    def apply(xhr: dom.XMLHttpRequest): Seq[Job] =
+      JValue.fromString(xhr.responseText).toObject[Seq[Job]]
+  }
+
   class Backend($: BackendScope[Unit, State]) {
     private var running = true
 
-    def poll(): Unit = {
-      val xhr = new dom.XMLHttpRequest()
-      xhr.open("GET", "/v1/jobs")
-      xhr.onload = { (e: dom.Event) =>
-        if (xhr.status == 200) {
-          val jobs = JValue.fromString(xhr.responseText).toObject[Seq[Job]]
-          $.modState { ste =>
-            State(jobs, ste.expanded)
-          }.runNow()
-        } else {
-          dom.console.log("error request job state", xhr.responseText)
+    def poll(): Unit =
+      Http.request[Seq[Job]]("GET", "/v1/jobs").
+        onComplete {
+          case Success(jobs) =>
+            js.timers.setTimeout(3.seconds) {
+              if (running) poll()
+            }
+            $.modState { ste => State(jobs, ste.expanded)}.runNow()
+          case Failure(ex) =>
+            println(ex.getMessage)
+            ex.printStackTrace(System.out)
         }
-
-        import scala.concurrent.duration._
-        js.timers.setTimeout(3.seconds) {
-          if (running) poll()
-        }
-      }
-      xhr.send()
-    }
 
     def start() = CallbackTo {
       dom.console.log("le start")
@@ -87,18 +89,14 @@ object HomePage {
       running = false
     }
 
-    def setGoal(job: Job, state: String): Unit = {
-      val xhr = new dom.XMLHttpRequest()
-      xhr.open("PUT", s"/v1/jobs/${job.id}/${state}")
-      xhr.onload = { (e: dom.Event) =>
-        if (xhr.status == 200)
-          dom.console.log(s"transition job ${job.id} to ${state} success")
-        else
-          dom.console.log(s"transition job ${job.id} to ${state} failed", xhr.responseText)
+    def setGoal(job: Job, state: String): Unit =
+      Http.request[Unit]("PUT", s"/v1/jobs/${job.id}/${state}").
+        onComplete {
+          case Success(_) =>
+            dom.console.log(s"transition job ${job.id} to ${state} success")
+          case Failure(ex) =>
+            dom.console.log(ex.getMessage)
       }
-      xhr.send()
-    }
-
 
     def render(s: State) =
       <.div(
@@ -168,7 +166,6 @@ object HomePage {
         }
       )
   }
-
 
   val JobsComponent = ReactComponentB[Unit]("Jobs").
     initialState(State(Nil)).

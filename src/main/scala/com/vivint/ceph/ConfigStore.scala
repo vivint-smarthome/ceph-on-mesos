@@ -1,9 +1,9 @@
 package com.vivint.ceph
 
-import akka.stream.scaladsl.{ Sink, Source }
-import org.slf4j.LoggerFactory
 import akka.stream.scaladsl.Flow
+import java.nio.charset.StandardCharsets.UTF_8
 import model.CephConfigHelper
+import org.slf4j.LoggerFactory
 import scala.concurrent.{ ExecutionContext, Future }
 
 case class ConfigStore(kvStore: kvstore.KVStore) {
@@ -37,8 +37,14 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
     kvStore.watch(configPath).
       via(configParsingFlow)
 
+  def getText =
+    kvStore.get(configPath)
+
+  def storeText(str: String) =
+    kvStore.set(configPath, str.getBytes(UTF_8))
+
   def get = {
-    kvStore.get(configPath).
+    getText.
       map {
         case Some(bytes) =>
           CephConfigHelper.parse(bytes)
