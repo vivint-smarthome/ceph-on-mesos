@@ -273,7 +273,10 @@ class JobBehavior(
         case None | Some(_: TaskState.Limbo) =>
           SetBehaviorTimer("timeout", 60.seconds)
         case other =>
-          Stay
+          if (state.goal != state.lastLaunched)
+            Transition(Killing(70.seconds, { (_, _) => MatchAndLaunchEphemeral }))
+          else
+            Stay
       }
     }
 
