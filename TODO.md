@@ -2,7 +2,6 @@
 
 ## definitely
 
-- [ ] Simple web UI
 - [ ] Permit OSD btrfs deployment
 - [ ] Permissive resource releases. It would be better that a bug result in resources not being released, than release
       resources that shouldn't be released.
@@ -23,6 +22,7 @@
 
 ## done
 
+- [x] Simple web UI
 - [x] Configurable ceph-docker image, allowing local / private repository to be used.
 - [x] Packaging
 - [x] Mesos DNS discovery / srv records [0.2.0]
