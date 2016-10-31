@@ -1,49 +1,41 @@
 package com.vivint.ceph
 
-import akka.actor.{ ActorRef, ActorSystem, PoisonPill, Props }
-import akka.pattern.ask
-import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{ Flow, Keep, Sink }
-import akka.testkit.TestKit
-import akka.testkit.TestProbe
-import akka.util.Timeout
-import com.typesafe.config.{ Config, ConfigFactory, ConfigRenderOptions }
 import java.io.File
-import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Base64.getDecoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
-import mesosphere.mesos.protos.Resource.{CPUS, MEM, PORTS, DISK}
-import org.apache.commons.io.FileUtils
-import org.apache.mesos.Protos
-import org.scalatest.Inside
-import org.scalatest.exceptions.TestFailedException
-import org.scalatest.{ BeforeAndAfterAll, FunSpecLike, Matchers }
+
+import scala.annotation.tailrec
+import scala.collection.JavaConversions._
+import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
+
+import akka.actor.{ActorRef, ActorSystem, PoisonPill, Props}
+import akka.pattern.ask
+import akka.stream.ActorMaterializer
+import akka.stream.scaladsl.{Flow, Keep, Sink}
+import akka.testkit.TestProbe
+import akka.util.Timeout
+import com.typesafe.config.{Config, ConfigFactory, ConfigRenderOptions}
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.lib.TgzHelper
-import com.vivint.ceph.model.{ PersistentState, JobRole, Job, RunState, ServiceLocation }
+import com.vivint.ceph.model.{Job, JobRole, RunState, ServiceLocation}
 import com.vivint.ceph.views.ConfigTemplates
-import scala.annotation.tailrec
-import scala.collection.breakOut
-import scala.collection.JavaConversions._
-import scala.collection.JavaConverters._
-import scala.concurrent.duration._
-import scala.concurrent.{ Await, Awaitable, ExecutionContext }
-import scala.reflect.ClassTag
+import java.nio.charset.StandardCharsets.UTF_8
+import mesosphere.mesos.protos.Resource.{CPUS, DISK, MEM}
+import org.apache.commons.io.FileUtils
+import org.apache.mesos.Protos
+import org.scalatest.{Inside, BeforeAndAfterAll, FunSpecLike, Matchers}
+import scaldi.{Injector, Module}
 import scaldi.Injectable._
-import scaldi.{ Injector, Module }
 
-class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
-    with FunSpecLike with Matchers with BeforeAndAfterAll with Inside {
 
-  val idx = new AtomicInteger()
+class IntegrationTest extends lib.CephActorTest("integrationTest")
+    with FunSpecLike with Matchers with BeforeAndAfterAll with Inside with lib.TestHelpers {
+
   val fileStorePath = new File("tmp/test-store")
   implicit val timeout = Timeout(3.seconds)
   import ProtoHelpers._
-
-  def await[T](f: Awaitable[T], duration: FiniteDuration = 5.seconds) = {
-    Await.result(f, duration)
-  }
 
   def renderConfig(cfg: Config) = {
     cfg.root().render(ConfigRenderOptions.defaults.setOriginComments(false))
@@ -51,19 +43,24 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
 
   override def beforeAll(): Unit = {
     FileUtils.deleteDirectory(fileStorePath)
-  }
-
-  override def afterAll(): Unit = {
-    TestKit.shutdownActorSystem(system)
+    super.beforeAll()
   }
 
   trait TestBindings extends Module {
     val id = idx.incrementAndGet()
-    bind [TestProbe] to { TestProbe() } destroyWith {
+    bind [TestProbe] identifiedBy classOf[FrameworkActor] to { TestProbe() } destroyWith {
+      _.ref ! PoisonPill
+    }
+    bind [TestProbe] identifiedBy classOf[ReservationReaperActor] to { TestProbe() } destroyWith {
       _.ref ! PoisonPill
     }
 
-    bind [ActorRef] identifiedBy(classOf[FrameworkActor]) to { inject[TestProbe].ref }
+    bind [ActorRef] identifiedBy(classOf[FrameworkActor]) to {
+      inject[TestProbe](classOf[FrameworkActor]).ref
+    }
+    bind [ActorRef] identifiedBy(classOf[ReservationReaperActor]) to {
+      inject[TestProbe](classOf[ReservationReaperActor]).ref
+    }
     bind [ActorRef] identifiedBy(classOf[TaskActor]) to {
       system.actorOf(Props(new TaskActor), s"task-actor-${id}")
     } destroyWith { _ ! PoisonPill }
@@ -199,7 +196,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     import module.injector
 
     val taskActor = inject[ActorRef](classOf[TaskActor])
-    val probe = inject[TestProbe]
+    val probe = inject[TestProbe](classOf[FrameworkActor])
     implicit val sender = probe.ref
 
     inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
@@ -227,7 +224,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     import module.injector
 
     val taskActor = inject[ActorRef](classOf[TaskActor])
-    val probe = inject[TestProbe]
+    val probe = inject[TestProbe](classOf[FrameworkActor])
     implicit val sender = probe.ref
 
     inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)
@@ -349,7 +346,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     new OneMonitorRunning {
       import module.injector
 
-      taskActor ! TaskActor.UpdateGoal(monitorTask.id, model.RunState.Paused)
+      taskActor ! TaskActor.UpdateGoal(monitorTask.id, RunState.Paused)
 
       inside(receiveIgnoring(probe, 5.seconds, ignoreRevive)) {
         case Some(FrameworkActor.KillTask(taskId)) =>
@@ -380,7 +377,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
           task.getTaskId.getValue
       }
 
-      taskActor ! TaskActor.UpdateGoal(monitorTask.id, model.RunState.Running)
+      taskActor ! TaskActor.UpdateGoal(monitorTask.id, RunState.Running)
 
       taskActor ! FrameworkActor.StatusUpdate(
         newTaskStatus(relaunchedTaskId, monitorTask.slaveId.get, state = Protos.TaskState.TASK_RUNNING))
@@ -411,7 +408,7 @@ class IntegrationTest extends TestKit(ActorSystem("integrationTest"))
     import module.injector
 
     val taskActor = inject[ActorRef](classOf[TaskActor])
-    val probe = inject[TestProbe]
+    val probe = inject[TestProbe](classOf[FrameworkActor])
     implicit val sender = probe.ref
 
     inject[FrameworkIdStore].set(MesosTestHelper.frameworkID)

@@ -4,15 +4,13 @@ import com.vivint.ceph.kvstore.KVStore
 import scala.collection.immutable.Seq
 import scala.concurrent.{ ExecutionContext, Future }
 import scala.async.Async.{async, await}
-import java.nio.charset.StandardCharsets.UTF_8
 import play.api.libs.json._
+import java.nio.charset.StandardCharsets.UTF_8
 
 case class JobStore(kvStore: KVStore) {
   private val tasksPath = "tasks"
   import ExecutionContext.Implicits.global
-
   import model._
-
   import PlayJsonFormats._
 
   def getTasks: Future[Seq[PersistentState]] = async {

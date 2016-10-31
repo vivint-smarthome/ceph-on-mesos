@@ -81,4 +81,6 @@ object PlayJsonFormats{
 
   }
 
+  implicit val ReservationReleaseFormat = Json.format[ReservationRelease]
+  implicit val ReservationReleaseDetailsFormat = Json.format[ReservationReleaseDetails]
 }

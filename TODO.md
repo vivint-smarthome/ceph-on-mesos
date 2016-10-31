@@ -3,8 +3,6 @@
 ## definitely
 
 - [ ] Permit OSD btrfs deployment
-- [ ] Permissive resource releases. It would be better that a bug result in resources not being released, than release
-      resources that shouldn't be released.
 - [ ] Health checks. Leader launch pattern should wait for leader node to return successful health before launching
       other tasks.
 - [ ] add orchestrator events such as rolling restart, rolling repair, etc.
@@ -22,6 +20,8 @@
 
 ## done
 
+- [x] Explicit resource releases. It would be better that a bug result in resources not being released, than release
+      resources that shouldn't be released.
 - [x] Simple web UI
 - [x] Configurable ceph-docker image, allowing local / private repository to be used.
 - [x] Packaging

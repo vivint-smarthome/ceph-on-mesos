@@ -13,7 +13,7 @@ import akka.stream.ActorMaterializer
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.views.ConfigTemplates
 import scala.collection.breakOut
-import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole }
+import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole, ReservationReleaseDetails }
 import java.util.UUID
 import scaldi.Injector
 import scaldi.Injectable._
@@ -31,6 +31,7 @@ class HttpService(implicit inj: Injector) {
 
   val config = inject[AppConfiguration]
   val taskActor = inject[ActorRef](classOf[TaskActor])
+  val releaseActor = inject[ActorRef](classOf[ReservationReaperActor])
   val configTemplates = inject[ConfigTemplates]
 
   val a = null
@@ -46,6 +47,9 @@ class HttpService(implicit inj: Injector) {
 
   def getJobs: Future[Map[UUID, model.Job]] =
     (taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, model.Job]]
+
+  def getReleases: Future[List[ReservationReleaseDetails]] =
+    (releaseActor ? ReservationReaperActor.GetPendingReleases).mapTo[List[ReservationReleaseDetails]]
 
   def findJobByUUID(id: UUID) =
     getJobs.map { _.values.find(_.id == id) }
@@ -87,13 +91,22 @@ class HttpService(implicit inj: Injector) {
           }
         }
       } ~
+      pathPrefix("reservation-reaper") {
+        (pathEnd & get) {
+          complete(getReleases)
+        } ~
+        (put & path(Segment.map(uuidFromString) / "release")) { id =>
+          releaseActor ! ReservationReaperActor.OrderRelease(id)
+          complete(s"Reservation ${id} release order submitted")
+        }
+      } ~
       pathPrefix("jobs") {
         (pathEnd & get) {
           onSuccess(getJobs) { jobs =>
             complete(jobs.values.toList)
           }
         } ~
-          (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
+        (put & path(Segment.map(uuidFromString) / Segment.map(runStateFromString))) { (id, runState) =>
           onSuccess(findJobByUUID(id)) {
             case Some(job) =>
               taskActor ! TaskActor.UpdateGoal(job.id, runState)

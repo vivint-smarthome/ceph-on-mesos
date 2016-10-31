@@ -101,7 +101,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
       case Directives.Hold(offer, resourceMatch) =>
         // Decline existing held offer
         job.heldOffer.foreach {
-          case (pending, _) => pending.resultingOperationsPromise.trySuccess(Nil)
+          case (pending, _) => pending.decline()
         }
         job.copy(heldOffer = Some((offer, resourceMatch)))
       case Directives.Persist(data) =>
@@ -126,7 +126,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
         job.taskId.foreach(killTask)
         job
       case Directives.OfferResponse(pendingOffer, operations) =>
-        pendingOffer.resultingOperationsPromise.trySuccess(operations.toList)
+        pendingOffer.respond(operations.toList)
         job
     }
   }
@@ -159,7 +159,7 @@ class JobFSM(jobs: JobsState, log: LoggingAdapter, behaviorSet: BehaviorSet,
   private final def initializeBehavior(job: Job): Job = {
     log.info("job {}: Initializing behavior {}", job.id, job.behavior.name)
     val maybeRemoveHeldOffer =
-      if (job.heldOffer.map(_._1.resultingOperationsPromise.isCompleted).contains(true))
+      if (job.heldOffer.map(_._1.responded).contains(true))
         job.copy(heldOffer = None)
       else
         job

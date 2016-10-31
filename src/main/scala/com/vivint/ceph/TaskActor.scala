@@ -1,23 +1,26 @@
 package com.vivint.ceph
 
-import akka.actor.{ Actor, ActorLogging, ActorRef, Cancellable, Stash }
-import akka.pattern.pipe
-import akka.stream.{ ActorMaterializer, OverflowStrategy, ThrottleMode }
-import akka.stream.scaladsl.{ Flow, Keep, Sink, Source }
 import java.util.UUID
-import lib.FutureHelpers.tSequence
-import mesosphere.mesos.matcher._
-import org.apache.mesos.Protos
-import org.slf4j.LoggerFactory
-import com.vivint.ceph.kvstore.{KVStore, CrashingKVStore}
-import com.vivint.ceph.model._
+
 import scala.collection.breakOut
 import scala.collection.immutable.{Iterable, Seq}
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.util.{Success, Failure}
+import scala.util.{Failure, Success}
+
+import akka.actor.{Actor, ActorLogging, ActorRef, Stash}
+import akka.pattern.pipe
+import akka.stream.{ActorMaterializer, OverflowStrategy, ThrottleMode}
+import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import com.vivint.ceph.kvstore.{CrashingKVStore, KVStore}
+import com.vivint.ceph.model._
+import lib.FutureHelpers.tSequence
+import mesosphere.mesos.matcher._
+import org.apache.mesos.Protos
+import org.slf4j.LoggerFactory
 import scaldi.Injectable._
 import scaldi.Injector
+import lib.FutureMonitor.{crashSelfOnFailure, logSuccess}
 
 object TaskActor {
   sealed trait Command
@@ -40,28 +43,15 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   val kvStore = CrashingKVStore(inject[KVStore])
   val taskStore = JobStore(kvStore)
-  val offerOperations = inject[OfferOperations]
   val frameworkActor = inject[ActorRef](classOf[FrameworkActor])
   implicit val materializer = ActorMaterializer()
   val frameworkIdStore = inject[FrameworkIdStore]
   import ProtoHelpers._
 
-  var frameworkId : Protos.FrameworkID = _
-  var _taskFSM: JobFSM = _
-  implicit def taskFSM: JobFSM =
-    if (_taskFSM == null)
-      throw new IllegalStateException("tried to initialize a behavior before taskFSM was initializied")
-    else
-      _taskFSM
-
   val jobs = new JobsState(log)
-
-  var cephConfig: CephConfig = _
-
   val config = inject[AppConfiguration]
   val configStore = ConfigStore(kvStore)
   val offerMatchFactory = new MasterOfferMatchFactory
-  var offerMatchers: Map[JobRole.EnumVal, OfferMatchFactory.OfferMatcher] = Map.empty
 
   val getFirstConfigUpdate =
     Flow[Option[CephConfig]].
@@ -84,42 +74,47 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   val orchestrator = new Orchestrator(jobs)
   val lock = kvStore.lock(Constants.LockPath)
+  val releaseActor = inject[ActorRef](classOf[ReservationReaperActor])
+
+  var frameworkId : Protos.FrameworkID = _
+  var taskFSM: JobFSM = _
+  var cephConfig: CephConfig = _
+  var offerMatchers: Map[JobRole.EnumVal, OfferMatchFactory.OfferMatcher] = Map.empty
 
   override def preStart(): Unit = {
     import context.dispatcher
 
-    lib.FutureMonitor.monitor(result, log, "configuration stream")
-    lib.FutureMonitor.monitor(kvStore.crashed, log, "kvStore")
+    crashSelfOnFailure(result, log, "configuration stream")
+    crashSelfOnFailure(kvStore.crashed, log, "kvStore")
 
     configStore.storeConfigIfNotExist()
     jobs.addSubscriber {
       case (before, Some(after)) if before.map(_.version).getOrElse(0) != after.version =>
-        // version changed?
-        import context.dispatcher
         taskStore.save(after.pState).map(_ => PersistSuccess(after.id, after.version)) pipeTo self
     }
 
     log.info("pulling initial state for TaskActor")
-    def logging[T](f: Future[T], desc: String): Future[T] = {
-      log.debug(s"${desc} : pulling state")
-      f.onComplete {
-        case Success(_) => log.debug("{} : success", desc)
-        case Failure(ex) =>
-          log.error(ex, "{}: failure", desc)
-      }
-      f
-    }
-
-    logging(lock, "acquiring lock").
+    logSuccess(log, lock, "acquiring lock").
       flatMap { _ =>
         tSequence(
-          logging(taskStore.getTasks, "taskStore.getTasks"),
-          logging(frameworkIdStore.get, "frameworkIdStore.get"),
-          logging(ClusterSecretStore.createOrGenerateSecrets(kvStore), "secrets"),
-          logging(deployConfigF, "deploy config"))
+          logSuccess(log, taskStore.getTasks, "taskStore.getTasks"),
+          logSuccess(log, frameworkIdStore.get, "frameworkIdStore.get"),
+          logSuccess(log, ClusterSecretStore.createOrGenerateSecrets(kvStore), "secrets"),
+          logSuccess(log, deployConfigF, "deploy config"))
       }.
       map(InitialState.tupled).
       pipeTo(self)
+
+    jobs.addSubscriber {
+      case (Some(before), Some(after))
+          if before.reservationId.nonEmpty && before.reservationId != after.reservationId =>
+        /* if the reservationId changes, this is likely because another process couldn't confirm the
+         reservation. Whitelist the old one for removal. */
+        releaseActor ! ReservationReaperActor.OrderRelease(before.reservationId.get)
+      case (Some(before), None) if before.reservationId.nonEmpty =>
+        // an explicit delete is cause to release a reservation
+        releaseActor ! ReservationReaperActor.OrderRelease(before.reservationId.get)
+    }
   }
 
   override def postStop(): Unit = {
@@ -133,7 +128,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   def receive = {
     case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
       val behaviorSet = new JobBehavior(secrets, log, { () => frameworkId }, { () => cephConfig })
-      _taskFSM = new JobFSM(jobs,
+      taskFSM = new JobFSM(jobs,
         log = log,
         behaviorSet = behaviorSet,
         setTimer = { (job, timerName, duration) =>
@@ -243,7 +238,8 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     val deadline = config.offerTimeout / 6
     val pendingOffer = PendingOffer(offer)
     context.system.scheduler.scheduleOnce(deadline) {
-      pendingOffer.resultingOperationsPromise.trySuccess(Nil)
+      if (pendingOffer.decline())
+        log.warning("deadline passed for pendingOffer {}", pendingOffer.offer.id)
     }(context.dispatcher)
     pendingOffer
   }
@@ -277,8 +273,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
         pendingOffer.resultingOperations
 
-      case ((Some(_), Some(OurFrameworkId())), resources) =>
-        Future.successful(offerOperations.unreserveOffer(resources))
+      case ((Some(reservationId), Some(OurFrameworkId())), resources) =>
+        val pendingOffer = pendingOfferWithDeadline(offer.withResources(resources))
+        releaseActor ! ReservationReaperActor.UnknownReservation(reservationId, pendingOffer)
+        pendingOffer.resultingOperations
       case ((None, None), resources) =>
         val matchCandidateOffer = offer.withResources(resources)
         val matchingJob = jobs.values.

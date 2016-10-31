@@ -68,6 +68,17 @@ class Universe(config: AppConfiguration) extends FrameworkModule with Module {
     }
   }
 
+  bind [ActorRef] identifiedBy (classOf[ReservationReaperActor]) to {
+    system.actorOf(
+      BackoffSupervisor.props(childProps = Props(new ReservationReaperActor),
+        childName =  "release-actor",
+        minBackoff = 1.second,
+        maxBackoff = 10.seconds,
+        randomFactor = 0.2),
+      "release-actor-backoff"
+    )
+  }
+
   bind [ActorRef] identifiedBy (classOf[TaskActor]) to {
     system.actorOf(
       BackoffSupervisor.props(childProps = Props(new TaskActor),

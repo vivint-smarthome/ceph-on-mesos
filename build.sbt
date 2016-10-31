@@ -15,6 +15,9 @@ val appProperties = {
   IO.load(prop, new File("project/version.properties"))
   prop
 }
+
+ensimeScalaVersion in ThisBuild := "2.11.8"
+
 lazy val root = (project in file(".")).
   settings(
     commonSettings : _*).

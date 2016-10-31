@@ -4,7 +4,7 @@ import akka.http.scaladsl.marshalling.{Marshaller, ToEntityMarshaller}
 import akka.http.scaladsl.model.ParsingException
 import akka.http.scaladsl.unmarshalling.{FromEntityUnmarshaller, Unmarshaller}
 import akka.http.scaladsl.model.MediaTypes
-import com.vivint.ceph.model.{ Job, PlayJsonFormats, RunState }
+import com.vivint.ceph.model.{ Job, PlayJsonFormats, RunState, ReservationReleaseDetails }
 import play.api.libs.json._
 
 object ApiMarshalling {
@@ -19,7 +19,8 @@ object ApiMarshalling {
         Json.stringify(Json.toJson(data)) }
 
   import PlayJsonFormats._
-  implicit val jobWriter = toJsonResponse[Iterable[Job]]
+  implicit val jobsWriter = toJsonResponse[Iterable[Job]]
+  implicit val reservationReleaseWriter = toJsonResponse[Iterable[ReservationReleaseDetails]]
 
   def uuidFromString(str: String) =
     try {

@@ -224,6 +224,8 @@ object ProtoHelpers {
       else
         None
 
+    def id: String =
+      offer.getId.getValue
     def hostname: Option[String] =
       if (offer.hasHostname)
         Some(offer.getHostname)
