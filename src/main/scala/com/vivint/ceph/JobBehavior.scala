@@ -498,9 +498,10 @@ class JobBehavior(
         runState match {
           case RunState.Running =>
             s"""
-            |if [ "$$(df -T /var/lib/ceph | tail -n 1 | awk '{print $$2}')" != "xfs" ]; then
-            |  echo "Cowardly refusing to OSD start on non-xfs volume."
-            |  echo "Cowardly refusing to OSD start on non-xfs volume." 1>&2
+            |FS_TYPE="$$(df -T /var/lib/ceph | tail -n 1 | awk '{print $$2}')"
+            |if [ "$${FS_TYPE}" != "xfs" ] && [ "$${FS_TYPE}" != "btrfs" ]; then
+            |  echo "Cowardly refusing to OSD start on non-xfs / non-btrfs volume."
+            |  echo "Cowardly refusing to OSD start on non-xfs / non-btrfs volume." 1>&2
             |  echo "Please see http://docs.ceph.com/docs/jewel/rados/configuration/filesystem-recommendations/#not-recommended for more information"
             |  sleep 60
             |  exit

@@ -2,7 +2,7 @@
 
 ## definitely
 
-- [ ] Permit OSD btrfs deployment
+- [ ] Better task reconciliation handling with transitional agents.
 - [ ] Health checks. Leader launch pattern should wait for leader node to return successful health before launching
       other tasks.
 - [ ] add orchestrator events such as rolling restart, rolling repair, etc.
@@ -12,6 +12,7 @@
 - [ ] Add authentication for SSL framework endpoint. (SSL client auth?)
 - [ ] Support for CEPH deploying metadata servers
 - [ ] Support for launching Ceph on other container engines, such as RKT.
+- [ ] validate configuration before saving
 
 ## maybe
 
@@ -20,6 +21,7 @@
 
 ## done
 
+- [x] Permit OSD btrfs deployment
 - [x] Explicit resource releases. It would be better that a bug result in resources not being released, than release
       resources that shouldn't be released.
 - [x] Simple web UI
