@@ -31,7 +31,7 @@ object DanglingReservationsPage {
 
   case class State(dangling: Seq[DanglingReservation], expanded: Set[String] = Set.empty)
 
-  import elements.{Table, Grid, Row, Col, Button, Alert}
+  import elements.{Table, Grid, Row, Col, Button, Alert, Glyphicon}
 
   implicit val danglingReservationsDeserializer = new Http.Unmarshaller[Seq[DanglingReservation]] {
     def apply(xhr: dom.XMLHttpRequest): Seq[DanglingReservation] =
@@ -50,6 +50,7 @@ object DanglingReservationsPage {
   val danglingReservationDetails = ReactComponentB[DanglingReservation]("DanglingReservationDetails").
     render_P { danglingReservation =>
       Row()(
+        Col(xs = 1)(),
         Col(xs = 6)(
           Table()(
             <.thead(
@@ -126,7 +127,8 @@ object DanglingReservationsPage {
                 <.thead(
                   <.tr(
                     <.th("id"),
-                    <.th("lastSeen"))),
+                    <.th("lastSeen"),
+                    <.th())),
                 <.tbody(
                   s.dangling.sortBy(_.id).map { dangling =>
                     Seq(
@@ -138,11 +140,17 @@ object DanglingReservationsPage {
                             else
                               s.expanded + dangling.id) },
                         <.td(dangling.id.take(7)),
-                        <.td(dangling.lastSeen)),
+                        <.td(dangling.lastSeen),
+                        <.td(Glyphicon(
+                          if (s.expanded contains dangling.id)
+                            "menu-down"
+                          else
+                            "menu-up")())
+                      ),
                       <.tr(
                         <.td(
                           AppCSS.Style.hiddenTableRow,
-                          ^.colSpan := 4,
+                          ^.colSpan := 3,
                           if (s.expanded contains dangling.id)
                             danglingReservationDetails(dangling)
                           else

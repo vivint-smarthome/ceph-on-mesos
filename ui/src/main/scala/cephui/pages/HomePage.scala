@@ -31,7 +31,7 @@ object HomePage {
 
   case class State(jobs: Seq[Job], expanded: Set[String] = Set.empty)
 
-  import elements.{Table, Grid, Row, Col, Button}
+  import elements.{Table, Grid, Row, Col, Button, Glyphicon}
   def renderLocation(jobId: String, location: models.Location): ReactNode = {
     val portSuffix = location.port.map(p => s":${p}").getOrElse("")
 
@@ -67,8 +67,8 @@ object HomePage {
   val jobDetails = ReactComponentB[Job]("JobDetails").
     render_P { job =>
       Row()(
-        Col(
-          xs = 6)(
+        Col(xs = 1)(),
+        Col(xs = 6)(
           Table()(
             <.thead(
               <.tr(
@@ -138,7 +138,8 @@ object HomePage {
                     <.th("id"),
                     <.th("location"),
                     <.th("goal"),
-                    <.th("state"))),
+                    <.th("state"),
+                    <.th())),
                 <.tbody(
                   roleJobs.sortBy(_.id).flatMap { job =>
                     Seq(
@@ -149,11 +150,17 @@ object HomePage {
                         <.td(job.id.take(7)),
                         <.td(renderLocation(job.id, job.location)),
                         <.td(job.goal.getOrElse[String]("")),
-                        <.td(job.taskStatus.map(_.toString).getOrElse[String](""))),
+                        <.td(job.taskStatus.map(_.toString).getOrElse[String]("")),
+                        <.td(Glyphicon(
+                          if (s.expanded contains job.id)
+                            "menu-down"
+                          else
+                            "menu-up")())
+                      ),
                       <.tr(
                         <.td(
                           AppCSS.Style.hiddenTableRow,
-                          ^.colSpan := 4,
+                          ^.colSpan := 5,
                           if (s.expanded contains job.id)
                             jobDetails(job)
                           else

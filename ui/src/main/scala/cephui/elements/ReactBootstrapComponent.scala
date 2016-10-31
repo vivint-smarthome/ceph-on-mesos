@@ -293,3 +293,14 @@ case class Alert(
   closeLabel: js.UndefOr[String] = js.undefined,
   onDismiss: js.UndefOr[() => Unit] = js.undefined
 ) extends ReactBootstrapComponent
+
+case class Glyphicon(
+  glyph: String,
+  id: js.UndefOr[String]  = js.undefined,
+  className: js.UndefOr[String] = js.undefined,
+  ref: js.UndefOr[String] = js.undefined, key: js.UndefOr[Any] = js.undefined,
+
+  /**Base CSS class and prefix for the component. Generally one should only change bsClass to provide new,
+    *non-Bootstrap, CSS styles for a component.*/
+  bsClass: js.UndefOr[String] = "glyphicon"
+) extends ReactBootstrapComponent
