@@ -17,7 +17,7 @@ import lib.zonedDateTimeOrdering
 
 object ReservationReaperActor {
   sealed trait Command
-  case class OrderRelease(reservationId: UUID) extends Command
+  case class OrderUnreserve(reservationId: UUID) extends Command
 
   case class UnknownReservation(reservationId: UUID, pendingOffer: PendingOffer) extends Command
   case object Cleanup extends Command
@@ -71,7 +71,7 @@ class ReservationReaperActor(implicit inj: Injector) extends Actor with ActorLog
       else
         pendingOffer.decline()
 
-    case OrderRelease(reservationId) =>
+    case OrderUnreserve(reservationId) =>
       update(
         pendingReleases(reservationId).copy(lastSeen = now(), unreserve = true))
 

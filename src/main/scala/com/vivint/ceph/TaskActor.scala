@@ -110,10 +110,10 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
           if before.reservationId.nonEmpty && before.reservationId != after.reservationId =>
         /* if the reservationId changes, this is likely because another process couldn't confirm the
          reservation. Whitelist the old one for removal. */
-        releaseActor ! ReservationReaperActor.OrderRelease(before.reservationId.get)
+        releaseActor ! ReservationReaperActor.OrderUnreserve(before.reservationId.get)
       case (Some(before), None) if before.reservationId.nonEmpty =>
         // an explicit delete is cause to release a reservation
-        releaseActor ! ReservationReaperActor.OrderRelease(before.reservationId.get)
+        releaseActor ! ReservationReaperActor.OrderUnreserve(before.reservationId.get)
     }
   }
 

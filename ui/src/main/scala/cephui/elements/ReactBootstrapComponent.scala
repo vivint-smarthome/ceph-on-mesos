@@ -275,3 +275,21 @@ case class Collapse(
 
   unmountOnExit: Boolean = false	// Unmount the component (remove it from the DOM) when it is faded out
 ) extends ReactBootstrapComponent
+
+
+case class Alert(
+  id: js.UndefOr[String]  = js.undefined,
+  className: js.UndefOr[String] = js.undefined,
+  ref: js.UndefOr[String] = js.undefined, key: js.UndefOr[Any] = js.undefined,
+
+  /** Base CSS class and prefix for the component. Generally one should only change bsClass to provide new,
+    * non-Bootstrap, CSS styles for a component.*/
+  bsClass: js.UndefOr[String] = "alert",
+
+  /**one of: "success", "warning", "danger", "info"; Component visual or contextual style variants. */
+  bsStyle: js.UndefOr[String] = "info",
+
+  /**'Close alert' */
+  closeLabel: js.UndefOr[String] = js.undefined,
+  onDismiss: js.UndefOr[() => Unit] = js.undefined
+) extends ReactBootstrapComponent

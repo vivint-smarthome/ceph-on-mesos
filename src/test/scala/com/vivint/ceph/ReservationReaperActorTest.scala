@@ -83,7 +83,7 @@ class ReservationReaperActorTest extends lib.CephActorTest("releaseActorTest")
         val pendingOffer = PendingOffer(
           reservedOffer(reservationId))
 
-        releaseActor ! OrderRelease(reservationId)
+        releaseActor ! OrderUnreserve(reservationId)
         releaseActor ! UnknownReservation(reservationId, pendingOffer)
         await(pendingOffer.resultingOperations).nonEmpty shouldBe true
       }

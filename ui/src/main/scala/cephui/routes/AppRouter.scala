@@ -6,7 +6,7 @@ import japgolly.scalajs.react.vdom.prefix_<^._
 
 import cephui.components.{TopNav, Footer}
 import cephui.models.Menu
-import cephui.pages.{HomePage,ConfigPage}
+import cephui.pages.{HomePage,ConfigPage,DanglingReservationsPage}
 
 object AppRouter {
 
@@ -14,16 +14,14 @@ object AppRouter {
 
   case object Home extends AppPage
   case object Config extends AppPage
-  case class Items(p : Item) extends AppPage
-
+  case object DanglingReservations extends AppPage
 
   val config = RouterConfigDsl[AppPage].buildConfig { dsl =>
     import dsl._
-    val itemRoutes : Rule = Item.routes.prefixPath_/("#items").pmap[AppPage](Items){ case Items(p) => p}
     (trimSlashes
       | staticRoute(root, Home) ~> render(HomePage())
       | staticRoute("#config", Config) ~> render(ConfigPage())
-      | itemRoutes
+      | staticRoute("#dangling-reservations", DanglingReservations) ~> render(DanglingReservationsPage())
       ).notFound(redirectToPage(Home)(Redirect.Replace))
       .renderWith(layout)
   }
@@ -32,7 +30,7 @@ object AppRouter {
   val mainMenu = Vector(
    Menu("Home",Home),
    Menu("Config",Config),
-   Menu("Items",Items(Item.Info))
+   Menu("Dangling Reservations",DanglingReservations)
   )
 
   def layout(c: RouterCtl[AppPage], r: Resolution[AppPage]) = {

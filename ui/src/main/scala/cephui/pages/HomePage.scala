@@ -29,13 +29,6 @@ object HomePage {
   }
 
 
-  val losItems = ReactComponentB[Seq[Job]]("Jobs").
-    render_P { jobs =>
-      <.div(
-        jobs.map(_.id))
-    }.
-    build
-
   case class State(jobs: Seq[Job], expanded: Set[String] = Set.empty)
 
   import elements.{Table, Grid, Row, Col, Button}
@@ -61,6 +54,50 @@ object HomePage {
     def apply(xhr: dom.XMLHttpRequest): Seq[Job] =
       JValue.fromString(xhr.responseText).toObject[Seq[Job]]
   }
+
+  def setGoal(job: Job, state: String): Unit =
+    Http.request[Unit]("PUT", s"/v1/jobs/${job.id}/${state}").
+      onComplete {
+        case Success(_) =>
+          dom.console.log(s"transition job ${job.id} to ${state} success")
+        case Failure(ex) =>
+          dom.console.log(ex.getMessage)
+      }
+
+  val jobDetails = ReactComponentB[Job]("JobDetails").
+    render_P { job =>
+      Row()(
+        Col(
+          xs = 6)(
+          Table()(
+            <.thead(
+              <.tr(
+                <.th("Field"),
+                <.th("Value"))),
+            <.tbody(
+              <.tr(<.td("ID"), <.td(job.id)),
+              <.tr(<.td("Behavior"), <.td(job.behavior)),
+              <.tr(<.td("lastLaunched"), <.td(job.lastLaunched.getOrElse[String](""))),
+              <.tr(<.td("goal"), <.td(job.goal.getOrElse[String](""))),
+              <.tr(<.td("persistence"), <.td(s"${job.version} / ${job.persistentVersion}")),
+              <.tr(<.td("wantingNewOffer"), <.td(job.wantingNewOffer.toString))))),
+        Col(
+          xs = 4)(
+          job.goal match {
+            case Some("running") =>
+              Button(bsStyle = "warning",
+                onClick = { () => setGoal(job, "paused") })(
+                "Pause")
+            case Some("paused") =>
+              Button(bsStyle = "success",
+                onClick = { () => setGoal(job, "running") })(
+                "Run")
+            case _ =>
+              <.span()
+          }
+        ))
+    }.
+    build
 
   class Backend($: BackendScope[Unit, State]) {
     private var running = true
@@ -88,15 +125,6 @@ object HomePage {
       dom.console.log("le end")
       running = false
     }
-
-    def setGoal(job: Job, state: String): Unit =
-      Http.request[Unit]("PUT", s"/v1/jobs/${job.id}/${state}").
-        onComplete {
-          case Success(_) =>
-            dom.console.log(s"transition job ${job.id} to ${state} success")
-          case Failure(ex) =>
-            dom.console.log(ex.getMessage)
-      }
 
     def render(s: State) =
       <.div(
@@ -127,35 +155,7 @@ object HomePage {
                           AppCSS.Style.hiddenTableRow,
                           ^.colSpan := 4,
                           if (s.expanded contains job.id)
-                            Row()(
-                              Col(
-                                xs = 4)(
-                                Table()(
-                                  <.thead(
-                                    <.tr(
-                                      <.th("Field"),
-                                      <.th("Value"))),
-                                  <.tbody(
-                                    <.tr(<.td("Behavior"), <.td(job.behavior)),
-                                    <.tr(<.td("lastLaunched"), <.td(job.lastLaunched.getOrElse[String](""))),
-                                    <.tr(<.td("goal"), <.td(job.goal.getOrElse[String](""))),
-                                    <.tr(<.td("persistence"), <.td(s"${job.version} / ${job.persistentVersion}")),
-                                    <.tr(<.td("wantingNewOffer"), <.td(job.wantingNewOffer.toString))))),
-                              Col(
-                                xs = 4)(
-                                job.goal match {
-                                  case Some("running") =>
-                                    Button(bsStyle = "warning",
-                                      onClick = { () => setGoal(job, "paused") })(
-                                      "Pause")
-                                  case Some("paused") =>
-                                    Button(bsStyle = "success",
-                                      onClick = { () => setGoal(job, "running") })(
-                                      "Run")
-                                  case _ =>
-                                    <.span()
-                                }
-                              ))
+                            jobDetails(job)
                           else
                             <.span())))
                   }

@@ -95,8 +95,13 @@ class HttpService(implicit inj: Injector) {
         (pathEnd & get) {
           complete(getReleases)
         } ~
-        (put & path(Segment.map(uuidFromString) / "release")) { id =>
-          releaseActor ! ReservationReaperActor.OrderRelease(id)
+        (path("dangling")) {
+          onSuccess(getReleases) { releases =>
+            complete(releases.filterNot(_.unreserve))
+          }
+        } ~
+        (put & path(Segment.map(uuidFromString) / "unreserve")) { id =>
+          releaseActor ! ReservationReaperActor.OrderUnreserve(id)
           complete(s"Reservation ${id} release order submitted")
         }
       } ~

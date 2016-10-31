@@ -31,6 +31,7 @@ trait FrameworkModule extends Module {
 class Universe(config: AppConfiguration) extends FrameworkModule with Module {
   implicit val system = ActorSystem("ceph-on-mesos")
 
+  bind [() => java.time.ZonedDateTime] identifiedBy 'now to { () => java.time.ZonedDateTime.now() }
   bind [AppConfiguration] to config
 
   bind [KVStore] to {

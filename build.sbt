@@ -7,7 +7,8 @@ val playVersion = "2.5.8"
 val logbackVersion = "1.1.7"
 val zookeeperVersion = "3.4.9"
 val commonSettings = Seq(
-  scalaVersion := "2.11.8"
+  scalaVersion := "2.11.8",
+  ensimeScalaVersion in ThisBuild := "2.11.8"
 )
 
 val appProperties = {
