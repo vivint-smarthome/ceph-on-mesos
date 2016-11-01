@@ -31,7 +31,7 @@ object Http {
     }
 
     xhr.onload = { (e: dom.Event) =>
-      if (xhr.status == 200) {
+      if ((200 until 300) contains xhr.status) {
         p.complete(Try(um.apply(xhr)))
       } else {
         p.failure(RequestFailure(xhr))

@@ -2,7 +2,7 @@ package com.vivint.ceph
 package api
 
 import akka.actor.{ ActorRef, ActorSystem }
-import akka.http.scaladsl.model.{ ContentTypes, MediaTypes }
+import akka.http.scaladsl.model.{ ContentTypes, MediaTypes, StatusCodes }
 import akka.http.scaladsl.model.headers.`Content-Type`
 import akka.http.scaladsl.model.{ HttpHeader, ParsingException }
 import akka.http.scaladsl.server.ExceptionHandler
@@ -13,7 +13,7 @@ import akka.stream.ActorMaterializer
 import com.vivint.ceph.kvstore.KVStore
 import com.vivint.ceph.views.ConfigTemplates
 import scala.collection.breakOut
-import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole, ReservationReleaseDetails }
+import com.vivint.ceph.model.{ RunState, ServiceLocation, JobRole, ReservationReleaseDetails, Job }
 import java.util.UUID
 import scaldi.Injector
 import scaldi.Injectable._
@@ -21,8 +21,10 @@ import scala.concurrent.duration._
 import akka.http.scaladsl.server.Directives._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
+import scala.util.{Success,Failure}
 import lib.FutureHelpers.tSequence
 import lib.TgzHelper.makeTgz
+import play.api.libs.json._
 
 class HttpService(implicit inj: Injector) {
   implicit val actorSystem = inject[ActorSystem]
@@ -45,8 +47,8 @@ class HttpService(implicit inj: Injector) {
         complete((400, s"Error parsing: ${ex.getMessage}"))
     }
 
-  def getJobs: Future[Map[UUID, model.Job]] =
-    (taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, model.Job]]
+  def getJobs: Future[Map[UUID, Job]] =
+    (taskActor ? TaskActor.GetJobs).mapTo[Map[UUID, Job]]
 
   def getReleases: Future[List[ReservationReleaseDetails]] =
     (releaseActor ? ReservationReaperActor.GetPendingReleases).mapTo[List[ReservationReleaseDetails]]
@@ -85,8 +87,11 @@ class HttpService(implicit inj: Injector) {
             complete(configStore.getText)
           } ~
           (put & entity(as[String])) { cfg =>
-            onSuccess(configStore.storeText(cfg)) {
-              complete("ok")
+            onComplete(configStore.storeText(cfg)) {
+              case Success(_) =>
+                complete("ok")
+              case Failure(ex) =>
+                complete((StatusCodes.BadRequest, model.ErrorResponse(ex.getMessage)))
             }
           }
         }

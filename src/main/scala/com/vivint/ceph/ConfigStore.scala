@@ -40,8 +40,15 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
   def getText =
     kvStore.get(configPath)
 
-  def storeText(str: String) =
-    kvStore.set(configPath, str.getBytes(UTF_8))
+  def storeText(str: String) = {
+    try {
+      model.CephConfigHelper.parse(str)
+      kvStore.set(configPath, str.getBytes(UTF_8))
+    } catch {
+      case ex: Throwable =>
+        Future.failed(ex)
+    }
+  }
 
   def get = {
     getText.

@@ -10,8 +10,10 @@ import scalacss.Defaults._
 import scalacss.ScalaCssReact._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.{Success,Failure}
-object ConfigPage {
+import json._
+import models.JsFormats._
 
+object ConfigPage {
   object Style extends StyleSheet.Inline {
     import dsl._
     val content = style(textAlign.center,
@@ -20,14 +22,15 @@ object ConfigPage {
       paddingTop(40.px))
   }
 
-  case class State(config: Option[String], saving: Boolean = false)
+  case class Message(error: Boolean, text: String)
+  case class State(config: Option[String], saving: Boolean = false, message: Option[Message] = None)
   class Backend($: BackendScope[Unit, State]) {
     def start() = CallbackTo {
       Http.request[String]("GET", "/v1/config/deployment-config.conf").
         onComplete {
           case Success(cfg) => $.modState { ste => ste.copy(Some(cfg)) }.runNow()
           case Failure(ex) =>
-            println(ex)
+            $.modState { _.copy(message = Some(Message(error = true, text = ex.getMessage))) }.runNow()
         }
     }
 
@@ -39,7 +42,6 @@ object ConfigPage {
       }
     }
 
-
     def saveConfig() =
       $.modState { ste =>
         ste.config match {
@@ -47,11 +49,20 @@ object ConfigPage {
             Http.request[Unit]("PUT", "/v1/config/deployment-config.conf",
               headers = Map("Content-Type" -> "application/text"),
               data = cfg).
-              onComplete { _ =>
-                dom.window.alert("success")
-                $.modState(_.copy(saving = false)).runNow()
+              onComplete {
+                case Success(_) =>
+                  $.modState(
+                    _.copy(saving = false, message = Some(Message(error = false, text = "Saved successfully")))).
+                    runNow()
+                case Failure(Http.RequestFailure(xhr)) if (xhr.status == 400) =>
+                  val err = JValue.fromString(xhr.responseText).toObject[models.ErrorResponse]
+                  $.modState(
+                    _.copy(saving = false, message = Some(Message(error = true, text = err.message)))).runNow()
+                case Failure(ex) =>
+                  $.modState(
+                    _.copy(saving = false, message = Some(Message(error = true, text = ex.getMessage)))).runNow()
               }
-            ste.copy(saving = true)
+            ste.copy(saving = true, message = None)
           case None =>
             ste
         }
@@ -75,7 +86,27 @@ object ConfigPage {
                   bsStyle = "success",
                   disabled = s.saving,
                   onClick = { () => saveConfig() })("Save Changes"))
-            )
+            ),
+            s.message match {
+              case Some(Message(false, text)) =>
+                Row()(
+                  Col(xs = 4)(
+                    Alert(
+                      bsStyle = "success",
+                      closeLabel = "Dismiss")(
+                      <.h4("Success!"),
+                      <.p(text))))
+              case Some(Message(true, text)) =>
+                Row()(
+                  Col(xs = 4)(
+                    Alert(
+                      bsStyle = "danger",
+                      closeLabel = "Dismiss")(
+                      <.h4("An error occurred!"),
+                      <.p(text))))
+              case _ =>
+                Nil
+            }
           )
         }
       )

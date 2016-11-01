@@ -6,4 +6,5 @@ object JsFormats {
   implicit val locationAccessor = ObjectAccessor.create[Location]
   implicit val jobAccessor = ObjectAccessor.create[Job]
   implicit val danglingReservationAccessor = ObjectAccessor.create[DanglingReservation]
+  implicit val errorReservationAccessor = ObjectAccessor.create[ErrorResponse]
 }
