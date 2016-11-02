@@ -1,0 +1,5 @@
+#!/bin/bash
+. project/version.properties
+gsed -E -i "s/ceph-on-mesos-[0-9.]+.tgz/ceph-on-mesos-${version}.tgz/" README.md
+
+echo $version 1>&2
