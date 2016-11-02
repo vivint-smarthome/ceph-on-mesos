@@ -8,7 +8,7 @@ import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-import akka.actor.{Actor, ActorLogging, ActorRef, Stash}
+import akka.actor.{Actor, ActorLogging, ActorRef, Stash, Cancellable}
 import akka.pattern.pipe
 import akka.stream.{ActorMaterializer, OverflowStrategy, ThrottleMode}
 import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
@@ -75,6 +75,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
   val orchestrator = new Orchestrator(jobs)
   val lock = kvStore.lock(Constants.LockPath)
   val releaseActor = inject[ActorRef](classOf[ReservationReaperActor])
+  var periodicReconcileTimer: Option[Cancellable] = None
 
   var frameworkId : Protos.FrameworkID = _
   var taskFSM: JobFSM = _
@@ -123,6 +124,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     configStream.cancel()
     throttledRevives.complete()
+    periodicReconcileTimer.foreach(_.cancel())
   }
 
   def receive = {
@@ -176,19 +178,40 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
     log.info("Beginning reconciliation")
     val reconciliationTimer = context.system.scheduler.scheduleOnce(30.seconds, self, ReconcileTimeout)(context.dispatcher)
-    var reconciledResult = List.empty[(Job, Protos.TaskStatus)]
-    frameworkActor ! FrameworkActor.Reconcile(
+    var reconciledResult: Map[UUID, Protos.TaskStatus] =
       jobs.
         values.
-        map { j => (j.taskId, j.slaveId) }.
+        map { j => (j.id, j.taskId, j.slaveId) }.
         collect {
-          case (Some(tid), Some(sid)) =>
-            newTaskStatus(tid, sid, Protos.TaskState.TASK_LOST)
-        }(breakOut))
+          case (jobId, Some(tid), Some(sid)) =>
+            jobId -> newTaskStatus(tid, sid, Protos.TaskState.TASK_LOST)
+        }(breakOut)
+
+    frameworkActor ! FrameworkActor.Reconcile(
+      reconciledResult.values.toList)
+
+    def finish(): Unit = {
+      reconciledResult.foreach { case (jobId, taskStatus) =>
+        jobs.updateJob(jobs(jobId).withTaskStatus(taskStatus))
+      }
+
+      reconciliationTimer.cancel()
+      unstashAll()
+      log.info("reconciliation complete")
+      periodicReconcileTimer.foreach(_.cancel())
+      periodicReconcileTimer = Some(
+        context.system.scheduler.schedule(0.minutes, 5.minutes) {
+          frameworkActor ! FrameworkActor.Reconcile(Nil)
+        }(context.dispatcher)
+      )
+
+      context.become(ready)
+    }
 
     context.become {
       case ReconcileTimeout =>
-        throw new Exception("timeout during reconciliation")
+        log.info("Timeout during explicit reconciliation")
+        finish()
       case FrameworkActor.ResourceOffers(offers) =>
         offers.foreach { o =>
           frameworkActor ! FrameworkActor.DeclineOffer(o.getId, Some(5.seconds))
@@ -202,7 +225,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             else
               log.info("received status update for {}", job.id)
             taskIdsForReconciliation -= taskId
-            reconciledResult = (job, taskStatus) :: reconciledResult
+            reconciledResult += job.id -> taskStatus
 
           case None =>
             log.info("received status update for unknown task {}; going to try and kill it", taskId)
@@ -210,17 +233,9 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
             frameworkActor ! FrameworkActor.KillTask(taskStatus.getTaskId)
         }
 
-        if (taskIdsForReconciliation.isEmpty) {
-          reconciledResult.foreach { case (task, taskStatus) =>
-            jobs.updateJob(task.withTaskStatus(taskStatus))
-          }
+        if (taskIdsForReconciliation.isEmpty)
+          finish()
 
-          reconciliationTimer.cancel()
-          unstashAll()
-          log.info("reconciliation complete")
-          frameworkActor ! FrameworkActor.Reconcile(Nil)
-          context.become(ready)
-        }
       case _ => stash()
     }
   }

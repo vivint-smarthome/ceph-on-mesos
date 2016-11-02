@@ -2,13 +2,10 @@
 
 ## definitely
 
-- [ ] Better task reconciliation handling with transitional agents. Assign TASK_LOST and disown after timeout. (causing
-      it to be killed if it is seen again)
 - [ ] Health checks. Leader launch pattern should wait for leader node to return successful health before launching
       other tasks.
 - [ ] add orchestrator events such as rolling restart, rolling repair, etc.
 - [ ] Version running states so we can rolling restart the nodes.
-- [ ] Support Mesos SSL
 - [ ] Support SSL for framework endpoint.
 - [ ] Add authentication for SSL framework endpoint. (SSL client auth?)
 - [ ] Support for CEPH deploying metadata servers
@@ -21,6 +18,9 @@
 
 ## done
 
+- [x] Better task reconciliation handling with transitional agents. Assign TASK_LOST and disown after timeout. (causing
+      it to be killed if it is seen again).
+- [x] Support Mesos SSL (verified working via LIBPROCESS_SSL_* vars)
 - [-] validate configuration before saving
 - [x] Permit OSD btrfs deployment
 - [x] Explicit resource releases. It would be better that a bug result in resources not being released, than release
