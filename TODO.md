@@ -40,6 +40,6 @@
 - [x] Emit TaskChanged messages as part of nodeupdated; concern too scattered.
 - [x] extract TaskFSM concerns from TaskActor.
 - [x] Extract launch strategy from node behavior and extract common behaviors into it's own library.
-- [ ] Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
-      lastLaunched changed.
+- [x] Consider emitting separate events for different kinds of node changes. IE - goal updated, task status changed,
+      lastLaunched changed. (not doing)
 

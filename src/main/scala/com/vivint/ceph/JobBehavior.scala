@@ -1,6 +1,5 @@
 package com.vivint.ceph
 
-import akka.event.LoggingAdapter
 import java.util.UUID
 import org.apache.mesos.Protos
 import com.vivint.ceph.model.{ Location, PartialLocation }
@@ -17,7 +16,6 @@ import java.util.Base64
 
 class JobBehavior(
   secrets: ClusterSecrets,
-  log: LoggingAdapter,
   frameworkId: Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
@@ -27,7 +25,6 @@ class JobBehavior(
       filter(_.role == JobRole.Monitor).
       flatMap{_.pState.serviceLocation}(breakOut)
 
-  val offerOperations = inject[OfferOperations]
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
 
