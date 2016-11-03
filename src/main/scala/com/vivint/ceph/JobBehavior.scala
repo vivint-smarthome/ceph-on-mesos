@@ -35,365 +35,6 @@ class JobBehavior(
   val configTemplates = inject[views.ConfigTemplates]
   val appConfig = inject[AppConfiguration]
 
-  def decideWhatsNext(state: Job, fullState: Map[UUID, Job]): Directives.Directive = {
-    import Directives._
-    state.pState match {
-      case pState if state.version != state.persistentVersion =>
-        // try again; previous persistence must have timed out.
-        Persist(pState).
-          withTransition(
-            WaitForSync(decideWhatsNext))
-      case pState =>
-        if (pState.reservationConfirmed)
-          Transition(Running)
-        else if (pState.slaveId.nonEmpty)
-          Transition(WaitForReservation)
-        else
-          Transition(MatchForReservation)
-    }
-  }
-
-  case object InitializeResident extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      decideWhatsNext(state: Job, fullState: Map[UUID, Job]): Directive
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive =
-      throw new IllegalStateException("handleEvent called on InitializeResident")
-  }
-
-  case class WaitForSync(nextBehavior: DecideFunction) extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      SetBehaviorTimer("timeout", 30.seconds)
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      event match {
-        case Timer("timeout") =>
-          nextBehavior(state, fullState)
-        case Timer(_) =>
-          Stay
-        case JobUpdated(prior) =>
-          if (state.persistentVersion < state.version)
-            Stay
-          else
-            nextBehavior(state, fullState)
-        case MatchedOffer(offer, matchResult) =>
-          Hold(offer, matchResult)
-      }
-    }
-  }
-
-  case object MatchForReservation extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      WantOffers
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      event match {
-        case Timer(_) =>
-          Stay
-        case JobUpdated(_) =>
-          Stay
-        case MatchedOffer(pendingOffer, matchResult) =>
-          val resources = pendingOffer.offer.resources
-          if (resources.forall { r => r.hasReservation }) {
-            val newState = state.pState.copy(
-              reservationConfirmed = true,
-              slaveId = Some(pendingOffer.slaveId))
-            Persist(newState) andAlso Hold(pendingOffer, matchResult) withTransition (Running)
-          } else {
-            val reservationId = UUID.randomUUID()
-            matchResult match {
-              case Some(result) =>
-                OfferResponse(
-                  pendingOffer,
-                  offerOperations.reserveAndCreateVolumes(
-                    frameworkId(),
-                    jobId = state.id,
-                    reservationId = reservationId, resourceMatch = result)).
-                  andAlso(
-                    Persist(
-                      state.pState.copy(
-                        slaveId = Some(pendingOffer.slaveId),
-                        reservationId = Some(reservationId)))).
-                  withTransition(WaitForReservation)
-              case None =>
-                OfferResponse(pendingOffer, Nil) andAlso WantOffers
-            }
-          }
-      }
-    }
-  }
-
-  case object WaitForReservation extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      SetBehaviorTimer("timeout", 30.seconds)
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      event match {
-        case Timer("timeout") =>
-          Transition(MatchForReservation)
-        case Timer(_) =>
-          Stay
-        case MatchedOffer(pendingOffer, matchResult) =>
-          if (pendingOffer.offer.resources.exists(_.hasReservation)) {
-            val newState = state.pState.copy(
-              reservationConfirmed = true)
-            Persist(newState).
-              andAlso(Hold(pendingOffer, matchResult)).
-              withTransition(WaitForSync(decideWhatsNext))
-          } else {
-            Hold(pendingOffer, matchResult).withTransition(MatchForReservation)
-          }
-        case JobUpdated(_) =>
-          Stay
-      }
-    }
-  }
-
-  case class Sleep(duration: FiniteDuration, andThen: DecideFunction) extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      SetBehaviorTimer("wakeup", duration)
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      event match {
-        case Timer("wakeup") =>
-          andThen(state, fullState)
-        case Timer(_) | JobUpdated(_) =>
-          Stay
-        case MatchedOffer(offer, matchResult) =>
-          Hold(offer, matchResult)
-      }
-    }
-  }
-
-
-  val holdingOffers: PartialFunction[JobFSM.Event, Directive] = {
-    case MatchedOffer(offer, matchResult) =>
-      Hold(offer, matchResult)
-  }
-
-  case class Killing(duration: FiniteDuration, andThen: TransitionFunction) extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      if (state.runningState.isEmpty)
-        throw new IllegalStateException("can't kill a non-running task")
-
-      SetBehaviorTimer("timeout", duration).andAlso(KillTask)
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      handleWith(event) {
-        holdingOffers orElse {
-          case Timer("timeout") =>
-            preStart(state, fullState)
-          case JobUpdated(_) if (state.runningState.isEmpty) =>
-            Transition(andThen(state, fullState))
-        }
-      }
-    }
-  }
-
-  case class WaitForGoal(andThen: TransitionFunction) extends Behavior {
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      handleWith(event) {
-        holdingOffers orElse {
-          case JobUpdated(_) if (state.goal.nonEmpty) =>
-            Transition(andThen(state, fullState))
-        }
-      }
-    }
-  }
-
-  case object MatchAndLaunchEphemeral extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      if (state.goal.isEmpty)
-        Transition(WaitForGoal{ (_,_) => MatchAndLaunchEphemeral})
-      else if (state.taskId.nonEmpty)
-        // If the task is dead, lost, or fails to return a status, EphemeralRunning will relaunch
-        Transition(EphemeralRunning)
-      else
-        WantOffers
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = event match {
-      case MatchedOffer(pendingOffer, matchResult) =>
-        state.role match {
-          case JobRole.RGW =>
-            val port =
-              deploymentConfig().deployment.rgw.port orElse inferPort(pendingOffer.offer.resources)
-            val location = PartialLocation(None, port)
-            val newTaskId = Job.makeTaskId(state.role, state.cluster)
-            Persist(
-              state.pState.copy(
-                slaveId = Some(pendingOffer.offer.getSlaveId.getValue),
-                lastLaunched = state.goal,
-                taskId = Some(newTaskId),
-                location = location
-              )).
-              andAlso(
-                OfferResponse(
-                  pendingOffer,
-                  launchRGWCommand(
-                    taskId = newTaskId,
-                    pendingOffer.offer,
-                    state,
-                    location = location,
-                    monLocations = getMonLocations(fullState),
-                    port = port.getOrElse(80)))).
-              withTransition(EphemeralRunning)
-          case _ =>
-            ???
-        }
-      case _  =>
-        Stay
-    }
-  }
-
-  case object EphemeralRunning extends Behavior {
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      if (state.taskId.isEmpty)
-        throw new IllegalStateException(s"Can't be EphemeralRunning without a taskId")
-      if (state.slaveId.isEmpty)
-        throw new IllegalStateException(s"Can't be EphemeralRunning without a slaveId")
-
-      decideWhatsNext(state)
-    }
-
-    def relaunch(state:Job): Directive =
-      Persist(state.pState.copy(taskId = None, slaveId = None, location = Location.empty)).
-        withTransition(MatchAndLaunchEphemeral)
-
-    def decideWhatsNext(state: Job): Directive = {
-      state.taskState match {
-        case Some(_: TaskState.Terminal) =>
-          relaunch(state)
-        case None | Some(_: TaskState.Limbo) =>
-          SetBehaviorTimer("timeout", 60.seconds)
-        case other =>
-          if (state.goal != state.lastLaunched)
-            Transition(Killing(70.seconds, { (_, _) => MatchAndLaunchEphemeral }))
-          else
-            Stay
-      }
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = event match {
-      case JobUpdated(_) =>
-        decideWhatsNext(state)
-      case Timer("timeout") =>
-        if (state.taskState.isEmpty || state.taskState.exists(_.isInstanceOf[TaskState.Limbo])) {
-          // task failed to launch. Try again.
-          relaunch(state)
-        } else {
-          Stay
-        }
-      case Timer(_) =>
-        Stay
-      case MatchedOffer(offer, _) =>
-        OfferResponse(offer, Nil)
-    }
-  }
-
-  case object Running extends Behavior {
-    def reservationConfirmed(state:Job) =
-      state.pState.reservationConfirmed
-
-    def getMonitors(fullState: Map[UUID, Job]) =
-      fullState.values.filter(_.role == JobRole.Monitor).toList
-
-    override def preStart(state: Job, fullState: Map[UUID, Job]): Directive = {
-      if(! state.reservationConfirmed)
-        throw new IllegalStateException("Can't go to running state without a confirmed reservation")
-      Revive andAlso nextRunAction(state, fullState)
-    }
-
-    def nextRunAction(state: Job, fullState: Map[UUID, Job]): Directive = {
-      (state.runningState, state.goal) match {
-        case (_, None) =>
-          Transition(WaitForGoal( { (_,_) => Running }))
-
-        case (Some(running), Some(goal)) if running != goal =>
-          // current running state does not match goal
-          Transition(Killing(70.seconds, { (_, _) => Running }))
-
-        case (_, Some(_)) =>
-          // if we already have a goal then proceed
-          Stay
-      }
-    }
-
-    def handleEvent(event: Event, state: Job, fullState: Map[UUID, Job]): Directive = {
-      event match {
-        case Timer(_) =>
-          Stay
-        case MatchedOffer(pendingOffer, _) =>
-          if (state.runningState.nonEmpty)
-            /* We shouldn't get the persistent offer for a task unless if the task is dead, so we shouldn't have to
-             * worry about this. Unless if two persistent offers were made for a task, on the same slave... which semes
-             * very unlikely */
-            throw new IllegalStateException("As assumption made by the framework author was wrong")
-
-          if(!pendingOffer.offer.resources.exists(_.hasReservation))
-            OfferResponse(pendingOffer, Nil)
-          else {
-            lazy val peers = state.peers(fullState.values)
-            lazy val monLocations = getMonLocations(fullState)
-            lazy val taskLocation = deriveLocation(pendingOffer.offer)
-            val newTaskId = Job.makeTaskId(state.role, state.cluster)
-            val persistDirective = Persist(
-              state.pState.copy(
-                location = taskLocation,
-                taskId = Some(newTaskId),
-                slaveId = Some(pendingOffer.offer.slaveId.get),
-                lastLaunched = state.goal))
-
-            (state.role, state.pState.goal) match {
-              case (JobRole.Monitor, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                persistDirective.
-                  andAlso(
-                    OfferResponse(
-                      pendingOffer,
-                      launchMonCommand(
-                        taskId = newTaskId,
-                        isLeader = peers.forall(_.pState.goal.isEmpty),
-                        pendingOffer.offer,
-                        state,
-                        taskLocation = taskLocation,
-                        desiredState,
-                        monLocations = monLocations
-                      )))
-              case (JobRole.OSD, Some(desiredState @ (RunState.Running | RunState.Paused))) =>
-                persistDirective.
-                  andAlso(
-                    OfferResponse(
-                      pendingOffer,
-                      launchOSDCommand(
-                        taskId = newTaskId,
-                        pendingOffer.offer,
-                        state,
-                        taskLocation = taskLocation,
-                        desiredState,
-                        monLocations = monLocations)))
-
-              case _ =>
-                ???
-            }
-          }
-        case JobUpdated(prior) =>
-          // if the goal has changed then we need to revaluate our next run state
-          val next = nextRunAction(state, fullState)
-          if (prior.runningState.nonEmpty && state.runningState.isEmpty) /* oops we lost it! */ {
-            Revive andAlso next
-          } else {
-            next
-          }
-      }
-    }
-  }
-
   private def inferPortRange(resources: Iterable[Protos.Resource], default: NumericRange.Inclusive[Long] = 6800L to 7300L):
       NumericRange.Inclusive[Long] =
     resources.
@@ -424,8 +65,7 @@ class JobBehavior(
 
   private def launchMonCommand(
     taskId: String, isLeader: Boolean, offer: Protos.Offer, job: Job, taskLocation: ServiceLocation,
-    runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
-      List[Protos.Offer.Operation] = {
+    runState: RunState.EnumVal, monLocations: Set[ServiceLocation]): Protos.TaskInfo = {
 
     val pullMonMapCommand = if (isLeader) {
       ""
@@ -464,15 +104,13 @@ class JobBehavior(
         }
     )
 
-    List(
-      newOfferOperation(
-        newLaunchOperation(Seq(taskInfo.build))))
+    taskInfo.build
   }
 
   private def launchOSDCommand(
     taskId: String, offer: Protos.Offer, job: Job, taskLocation: ServiceLocation,
     runState: RunState.EnumVal, monLocations: Set[ServiceLocation]):
-      List[Protos.Offer.Operation] = {
+      Protos.TaskInfo = {
 
     val pullMonMapCommand = {
       """if [ ! -f /etc/ceph/monmap-ceph ]; then
@@ -526,15 +164,13 @@ class JobBehavior(
         }
     )
 
-    List(
-      newOfferOperation(
-        newLaunchOperation(Seq(taskInfo.build))))
+    taskInfo.build
   }
 
   private def launchRGWCommand(
     taskId: String, offer: Protos.Offer, job: Job, location: Location,
     monLocations: Set[ServiceLocation], port: Int):
-      List[Protos.Offer.Operation] = {
+      Protos.TaskInfo = {
     val pullMonMapCommand = {
       """if [ ! -f /etc/ceph/monmap-ceph ]; then
         |  echo "Pulling monitor map"; ceph mon getmap -o /etc/ceph/monmap-ceph
@@ -567,9 +203,7 @@ class JobBehavior(
             |""".stripMargin
     )
 
-    List(
-      newOfferOperation(
-        newLaunchOperation(Seq(taskInfo.build))))
+    taskInfo.build
   }
 
 
@@ -649,8 +283,55 @@ class JobBehavior(
     taskInfo
   }
 
+  val mon = Behaviors(frameworkId, { (state, fullState, offer) =>
+    val location = deriveLocation(offer)
+    val task = launchMonCommand(
+      taskId = Job.makeTaskId(state.role, state.cluster),
+      isLeader = state.peers(fullState.values).forall(_.pState.goal.isEmpty),
+      offer,
+      state,
+      taskLocation = location,
+      state.goal.getOrElse(RunState.Paused),
+      monLocations = getMonLocations(fullState))
+    (location, task)
+  })
+
+  val osd = Behaviors(frameworkId, { (state, fullState, offer) =>
+    val location = deriveLocation(offer)
+    val task = launchOSDCommand(
+      taskId = Job.makeTaskId(state.role, state.cluster),
+      offer,
+      state,
+      taskLocation = location,
+      state.goal.getOrElse(RunState.Paused),
+      monLocations = getMonLocations(fullState))
+    (location, task)
+  })
+
+  val rgw = Behaviors(frameworkId, { (state, fullState, offer) =>
+    val port =
+      deploymentConfig().deployment.rgw.port orElse inferPort(offer.resources)
+    val location = PartialLocation(None, port)
+    val task = launchRGWCommand(
+      taskId = Job.makeTaskId(state.role, state.cluster),
+      offer,
+      state,
+      location = location,
+      monLocations = getMonLocations(fullState),
+      port = port.getOrElse(80)
+    )
+
+    (location, task)
+  })
+
   def defaultBehavior(role: JobRole.EnumVal) = role match {
-    case JobRole.Monitor | JobRole.OSD => InitializeResident
-    case JobRole.RGW => MatchAndLaunchEphemeral
+    case JobRole.Monitor =>
+      mon.InitializeResident
+
+    case JobRole.OSD =>
+      osd.InitializeResident
+
+    case JobRole.RGW =>
+      rgw.MatchAndLaunchEphemeral
   }
 }

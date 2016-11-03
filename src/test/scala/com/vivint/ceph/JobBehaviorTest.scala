@@ -25,7 +25,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
 
       val response = rgwJob.behavior.preStart(rgwJob, Map.empty)
       response.action shouldBe Nil
-      response.transition.get shouldBe (jobBehavior.EphemeralRunning)
+      response.transition.get shouldBe (jobBehavior.rgw.EphemeralRunning)
     }
 
     it("persists lastLaunched when accepting an offer") {
@@ -54,7 +54,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
           launchCommand.hasLaunch() shouldBe true
       }
 
-      transition shouldBe jobBehavior.EphemeralRunning
+      transition shouldBe jobBehavior.rgw.EphemeralRunning
     }
 
     it("relaunches tasks that are TASK_LOST after timeout") {
@@ -64,7 +64,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
 
       val Directive(Nil, Some(nextBehavior)) = rgwJob.behavior.preStart(rgwJob, Map.empty)
 
-      nextBehavior shouldBe jobBehavior.EphemeralRunning
+      nextBehavior shouldBe jobBehavior.rgw.EphemeralRunning
 
       val Directive(List(SetBehaviorTimer(timerId, _)), None) = nextBehavior.preStart(rgwJob, Map.empty)
 
@@ -80,7 +80,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
       relaunchState.slaveId shouldBe None
       relaunchState.location shouldBe Location.empty
 
-      relaunchBehavior shouldBe jobBehavior.MatchAndLaunchEphemeral
+      relaunchBehavior shouldBe jobBehavior.rgw.MatchAndLaunchEphemeral
 
     }
   }
