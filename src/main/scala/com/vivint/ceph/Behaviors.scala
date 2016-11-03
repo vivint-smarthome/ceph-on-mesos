@@ -26,7 +26,7 @@ object Behaviors {
 case class Behaviors(
   // TODO - we should just pass this in rather than have a getter function; don't initialize this code until framework
   // connected
-  frameworkId: () => Protos.FrameworkID,
+  frameworkId: Protos.FrameworkID,
   launchBehavior: LaunchBehaviorFactory)(implicit inj: Injector) {
 
   val offerOperations = inject[OfferOperations]
@@ -105,7 +105,7 @@ case class Behaviors(
                 OfferResponse(
                   pendingOffer,
                   offerOperations.reserveAndCreateVolumes(
-                    frameworkId(),
+                    frameworkId,
                     jobId         = state.id,
                     reservationId = reservationId,
                     resourceMatch = result)).

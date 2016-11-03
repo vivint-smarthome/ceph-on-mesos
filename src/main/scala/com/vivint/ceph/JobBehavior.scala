@@ -3,12 +3,9 @@ package com.vivint.ceph
 import akka.event.LoggingAdapter
 import java.util.UUID
 import org.apache.mesos.Protos
-import com.vivint.ceph.model.{ Location, PartialLocation, TaskState }
+import com.vivint.ceph.model.{ Location, PartialLocation }
 import com.vivint.ceph.model.{ JobRole, RunState, CephConfig, Job, ServiceLocation }
-import JobFSM._
-import Behavior._
 import scala.collection.immutable.NumericRange
-import scala.concurrent.duration._
 import scala.collection.breakOut
 import scala.collection.JavaConverters._
 import model.ClusterSecrets
@@ -17,12 +14,11 @@ import scaldi.Injectable._
 import mesosphere.mesos.protos.Resource.PORTS
 import ProtoHelpers._
 import java.util.Base64
-import Directives._
 
 class JobBehavior(
   secrets: ClusterSecrets,
   log: LoggingAdapter,
-  frameworkId: () => Protos.FrameworkID,
+  frameworkId: Protos.FrameworkID,
   deploymentConfig: () => CephConfig)(implicit injector: Injector)
     extends BehaviorSet {
 
@@ -256,7 +252,7 @@ class JobBehavior(
 
     val labels = Protos.Labels.newBuilder
     labels.addLabels(newLabel(Constants.JobIdLabel, jobId.toString))
-    labels.addLabels(newLabel(Constants.FrameworkIdLabel, frameworkId().getValue))
+    labels.addLabels(newLabel(Constants.FrameworkIdLabel, frameworkId.getValue))
     location.hostnameOpt.foreach { hostname =>
       labels.addLabels(newLabel(Constants.HostnameLabel, hostname))
     }
