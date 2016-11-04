@@ -50,7 +50,7 @@ Here is an example of a Marathon job which deploys the artifact directly using t
     "API_HOST": "0.0.0.0",
     "MESOS_MASTER": "zk://172.0.0.11:2181,172.0.0.12:2181,172.0.0.13:2181,172.0.0.14:2181,172.0.0.15:2181/mesos"
   },
-  "uris": ["https://dl.bintray.com/vivint-smarthome/ceph-on-mesos/ceph-on-mesos-0.2.6.tgz"],
+  "uris": ["https://dl.bintray.com/vivint-smarthome/ceph-on-mesos/ceph-on-mesos-0.2.8.tgz"],
   "portDefinitions": [{"protocol": "tcp", "name": "api"}],
   "healthChecks": [
     {
