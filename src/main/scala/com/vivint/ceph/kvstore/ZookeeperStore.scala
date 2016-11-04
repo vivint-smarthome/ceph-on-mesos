@@ -84,7 +84,7 @@ class ZookeeperStore(namespace: String = "ceph-on-mesos")(implicit injector: Inj
     } catch { case ex: KeeperException.NoNodeException =>
         client.create.
           creatingParentsIfNeeded.
-          forPath(sPath)
+          forPath(sPath, data)
     }
   }
 
