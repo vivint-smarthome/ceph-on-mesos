@@ -1,6 +1,8 @@
 package com.vivint.ceph
 
+import akka.actor.Kill
 import java.util.UUID
+import java.util.concurrent.TimeoutException
 
 import scala.collection.breakOut
 import scala.collection.immutable.{Iterable, Seq}
@@ -116,6 +118,48 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
         // an explicit delete is cause to release a reservation
         releaseActor ! ReservationReaperActor.OrderUnreserve(before.reservationId.get)
     }
+
+    startInitialization()
+  }
+
+  def startInitialization(): Unit = {
+    case object InitializationTimeout
+    val timeoutTimer = context.system.scheduler.scheduleOnce(15.seconds, self, InitializationTimeout)(context.dispatcher)
+    context.become {
+      case InitializationTimeout =>
+        throw new TimeoutException("Timeout while initializing TaskActor")
+      case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
+        timeoutTimer.cancel()
+        cephConfig = _cephConfig
+        frameworkId = fId
+        val behaviorSet = new JobBehavior(secrets, fId, { () => cephConfig })
+        taskFSM = new JobFSM(jobs,
+          log = log,
+          behaviorSet = behaviorSet,
+          setTimer = { (job, timerName, duration) =>
+            import context.dispatcher
+            context.system.scheduler.scheduleOnce(duration) {
+              self ! JobTimer(job.id, timerName, job.behavior)
+            }},
+          revive = { () => throttledRevives.offer(()) },
+          killTask = { (taskId: String) =>
+            frameworkActor ! FrameworkActor.KillTask(newTaskId(taskId))
+          }
+        )
+
+        log.info("InitialState: persistentTaskStates count = {}, fId = {}", persistentTaskStates.length, fId)
+
+        persistentTaskStates.
+          map { p =>
+            Job.fromState(p, defaultBehavior = taskFSM.defaultBehavior)
+          }.
+          foreach(taskFSM.initialize)
+
+        unstashAll()
+        startReconciliation()
+      case _ =>
+        stash()
+    }
   }
 
   override def postStop(): Unit = {
@@ -126,40 +170,6 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     throttledRevives.complete()
     periodicReconcileTimer.foreach(_.cancel())
   }
-
-  def receive = {
-    case iState @ InitialState(persistentTaskStates, fId, secrets, _cephConfig) =>
-      cephConfig = _cephConfig
-      frameworkId = fId
-      val behaviorSet = new JobBehavior(secrets, fId, { () => cephConfig })
-      taskFSM = new JobFSM(jobs,
-        log = log,
-        behaviorSet = behaviorSet,
-        setTimer = { (job, timerName, duration) =>
-          import context.dispatcher
-          context.system.scheduler.scheduleOnce(duration) {
-            self ! JobTimer(job.id, timerName, job.behavior)
-          }},
-        revive = { () => throttledRevives.offer(()) },
-        killTask = { (taskId: String) =>
-          frameworkActor ! FrameworkActor.KillTask(newTaskId(taskId))
-        }
-      )
-
-      log.info("InitialState: persistentTaskStates count = {}, fId = {}", persistentTaskStates.length, fId)
-
-      persistentTaskStates.
-        map { p =>
-          Job.fromState(p, defaultBehavior = taskFSM.defaultBehavior)
-        }.
-        foreach(taskFSM.initialize)
-
-      unstashAll()
-      startReconciliation()
-    case _ =>
-      stash()
-  }
-
 
   def startReconciliation(): Unit = {
     case object ReconcileTimeout
@@ -322,6 +332,12 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     }
     import context.dispatcher
     Future.sequence(operations).map(_.flatten)
+  }
+
+  def receive: Receive = {
+    case _ =>
+      // we should call startInitialization right away; no messages should arrive here.
+      ???
   }
 
   def ready: Receive = {
