@@ -13,6 +13,13 @@ Some highlights:
 
 For a list of planned features (and progress thus far), see the [TODO.md](./TODO.md) file in this repository.
 
+# Introductory video
+
+To help break the ice and make it easier to learn about the Ceph on Mesos framework, an introductionory video is available
+for your viewing pleasure:
+
+[![Deploying Ceph on Mesos](http://img.youtube.com/vi/X5xqVwohhHA/0.jpg)](https://youtu.be/X5xqVwohhHA "Deploying Ceph on Mesos")
+
 # Requirements
 
 - Mesos
