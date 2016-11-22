@@ -15,8 +15,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
   import module.injector
   val jobBehavior = new JobBehavior(
     ClusterSecrets.generate,
-    log = null,
-    frameworkId = { () => MesosTestHelper.frameworkID },
+    frameworkId = MesosTestHelper.frameworkID,
     deploymentConfig = { () => CephConfigHelper.parse(ConfigStore.default) }
   )
   describe("MatchAndLaunchEphemeral") {

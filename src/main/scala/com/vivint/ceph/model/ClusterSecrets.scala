@@ -13,6 +13,7 @@ case class ClusterSecrets(
   rgwRing: ByteString)
 
 object ClusterSecrets {
+  lazy val random = new SecureRandom()
   val KeySize = 16
   def generateKey = {
     // 0000000: 0100 3c64 f357 3dfe bd34 1000 2a00 93c7  ..<d.W=..4..*...
@@ -23,7 +24,6 @@ object ClusterSecrets {
     b.putInt((System.currentTimeMillis / 1000).toInt)
     b.putInt((System.nanoTime).toInt)
     b.putShort(16)
-    val random = SecureRandom.getInstanceStrong
     val bytes = Array.fill[Byte](KeySize)(0)
     random.nextBytes(bytes)
     b.put(bytes)
