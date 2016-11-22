@@ -31,7 +31,7 @@ for your viewing pleasure:
 # Deployment
 
 If you have the JVM installed on some or all of your slaves, you can launch Ceph-on-Mesos using the Mesos
-Containerizer. You may also package the artifact up in a docker container of your choice. It is easiest to use host
+Containerizer. You may also package the artifact up in a container, if you choose. It is easiest to use host
 networking, although so long as the framework has an IP which the Mesos masters can directly reach, you may use any
 networking abstraction you like.
 
@@ -57,7 +57,7 @@ Here is an example of a Marathon job which deploys the artifact directly using t
     "API_HOST": "0.0.0.0",
     "MESOS_MASTER": "zk://172.0.0.11:2181,172.0.0.12:2181,172.0.0.13:2181,172.0.0.14:2181,172.0.0.15:2181/mesos"
   },
-  "uris": ["https://dl.bintray.com/vivint-smarthome/ceph-on-mesos/ceph-on-mesos-0.2.8.tgz"],
+  "uris": ["https://dl.bintray.com/vivint-smarthome/ceph-on-mesos/ceph-on-mesos-0.2.9.tgz"],
   "portDefinitions": [{"protocol": "tcp", "name": "api"}],
   "healthChecks": [
     {
