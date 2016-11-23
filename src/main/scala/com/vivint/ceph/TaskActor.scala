@@ -6,7 +6,7 @@ import java.util.concurrent.TimeoutException
 
 import scala.collection.breakOut
 import scala.collection.immutable.{Iterable, Seq}
-import scala.concurrent.Future
+import scala.concurrent.{Future, ExecutionContext}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
@@ -164,7 +164,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
 
   override def postStop(): Unit = {
     // try and release the lock
-    lock.foreach { _.cancel() }(context.dispatcher)
+    lock.foreach { _.cancel() }(ExecutionContext.global)
 
     configStream.cancel()
     throttledRevives.complete()
