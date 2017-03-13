@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory
 import scaldi.Injectable._
 import scaldi.Injector
 import lib.FutureMonitor.{crashSelfOnFailure, logSuccess}
+import com.vivint.ceph.orchestrator.Orchestrator
 
 object TaskActor {
   sealed trait Command
@@ -74,7 +75,7 @@ class TaskActor(implicit val injector: Injector) extends Actor with ActorLogging
     })).
     run
 
-  val orchestrator = new Orchestrator(jobs)
+  val orchestrator = Orchestrator.run(jobs)
   val lock = kvStore.lock(Constants.LockPath)
   val releaseActor = inject[ActorRef](classOf[ReservationReaperActor])
   var periodicReconcileTimer: Option[Cancellable] = None
