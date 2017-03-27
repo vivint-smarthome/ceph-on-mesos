@@ -15,7 +15,7 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
 
     kvStore.get(configPath).flatMap {
       case None =>
-        kvStore.createOrSet(configPath, ConfigStore.default)
+        kvStore.createOrSet(configPath, ConfigStore.default())
       case Some(_) =>
         Future.successful(())
     }
@@ -59,16 +59,26 @@ case class ConfigStore(kvStore: kvstore.KVStore) {
           throw new RuntimeException("No configuration detected")
       }(ExecutionContext.global)
   }
-
-
-    // .map(CephConfigHelper.parse)
 }
 
 object ConfigStore {
-  lazy val default =  {
+  def default(environment: Map[String, String] = sys.env): Array[Byte] = {
+    val setMonInitFixedPort: String => String = { input =>
+      environment.get("CEPH_MON_INIT_PORT") match {
+        case Some(port) =>
+          input.replace("# port = 2015", s"port = ${port}")
+        case None =>
+          input
+      }
+    }
+
     import org.apache.commons.io.IOUtils
     val f = getClass.getResourceAsStream("/deployment-config.conf")
-    try { IOUtils.toByteArray(f) }
+    try {
+      val defaultTemplate = new String(IOUtils.toByteArray(f))
+      setMonInitFixedPort(defaultTemplate).
+        getBytes(UTF_8)
+    }
     finally { f.close() }
   }
 }

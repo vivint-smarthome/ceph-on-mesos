@@ -16,7 +16,7 @@ class JobBehaviorTest extends FunSpec with Matchers with Inside {
   val jobBehavior = new JobBehavior(
     ClusterSecrets.generate,
     frameworkId = MesosTestHelper.frameworkID,
-    deploymentConfig = { () => CephConfigHelper.parse(ConfigStore.default) }
+    deploymentConfig = { () => CephConfigHelper.parse(ConfigStore.default(Map.empty)) }
   )
   describe("MatchAndLaunchEphemeral") {
     it("waits for the task status to be known before requesting offers") {

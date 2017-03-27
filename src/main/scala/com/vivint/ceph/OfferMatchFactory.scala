@@ -133,8 +133,12 @@ class MonOfferMatcher(cephConfig: CephConfig, frameworkRole: String) extends Off
         MEM, cephConfig.deployment.mon.mem, selector, ScalarMatchResult.Scope.NoneDisk),
       new DiskResourceMatcher(
         selector, 0.0, List(volume), ScalarMatchResult.Scope.IncludingLocalVolumes),
-      new lib.SinglePortMatcher(
-        selector))
+      cephConfig.deployment.mon.port match {
+        case Some(port) =>
+          new lib.SpecificPortMatcher(port, selector)
+        case None =>
+          new lib.SinglePortMatcher(selector)
+      })
   }
 
   def apply(offer: Protos.Offer, task: Job, allTasks: Iterable[Job]): Option[ResourceMatcher.ResourceMatch] = {

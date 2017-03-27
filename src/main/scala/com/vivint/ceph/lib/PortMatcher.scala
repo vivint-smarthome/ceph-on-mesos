@@ -10,6 +10,36 @@ import scala.annotation.tailrec
 import scala.collection.JavaConversions._
 import com.vivint.ceph.ProtoHelpers
 
+/** Matches only a specific, fixed port */
+class SpecificPortMatcher(port: Int, resourceSelector: ResourceSelector) extends ResourceMatcher {
+  import ProtoHelpers._
+  val resourceName = Resource.PORTS
+  def apply(offerId: String, resources: Iterable[Protos.Resource]): Iterable[MatchResult] = {
+
+    (for {
+      resource <- resources.filter(resourceSelector(_)).headOption
+      range <- resource.ranges.headOption
+      if range.contains(port.toLong)
+    } yield {
+      List(
+        PortsMatchResult(
+          true,
+          List(Some(PortWithRole("main", port.toInt, resource.reservation))),
+          List(
+            resource.toBuilder().
+              setRanges(newRanges(List(port.toLong to port.toLong)))
+              .build)))
+    }) getOrElse {
+      List(
+        PortsMatchResult(
+          false,
+          Nil,
+          Nil))
+    }
+  }
+}
+
+/** Matches any solitary port from the offer */
 class SinglePortMatcher(resourceSelector: ResourceSelector) extends ResourceMatcher {
   import ProtoHelpers._
   val resourceName = Resource.PORTS
@@ -22,7 +52,7 @@ class SinglePortMatcher(resourceSelector: ResourceSelector) extends ResourceMatc
 
       // ReservationInfo
       List(
-        PortsMatchResult.apply(
+        PortsMatchResult(
           true,
           List(Some(PortWithRole("main", port.toInt, resource.reservation))),
           List(
@@ -39,6 +69,7 @@ class SinglePortMatcher(resourceSelector: ResourceSelector) extends ResourceMatc
   }
 }
 
+/** Matches n contiguous ports from the offer */
 class ContiguousPortMatcher(ports: Int, resourceSelector: ResourceSelector) extends ResourceMatcher {
   import ProtoHelpers._
   val resourceName = Resource.PORTS
@@ -61,7 +92,7 @@ class ContiguousPortMatcher(ports: Int, resourceSelector: ResourceSelector) exte
             val reserveRange = range.min to (range.min + ports - 1)
             // ReservationInfo
             List(
-              PortsMatchResult.apply(
+              PortsMatchResult(
                 true,
                 reserveRange.map { n => Some(PortWithRole("main", n.toInt, resource.reservation)) },
                 List(

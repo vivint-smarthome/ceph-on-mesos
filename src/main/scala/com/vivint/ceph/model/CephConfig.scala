@@ -14,7 +14,8 @@ case class MonDeploymentConfig(
   disk_type: DiskType,
   disk: Long,
   path_constraint: Option[String],
-  max_per_host: Int
+  max_per_host: Int,
+  port: Option[Int]
 )
 
 case class OSDDeploymentConfig(
@@ -60,7 +61,7 @@ case class CephConfig(
 
 
 object CephConfigHelper {
-  val defaultConfig = ConfigFactory.parseString("""
+  val defaultConfig = ConfigFactory.parseString(s"""
 deployment {
   docker_image = "ceph/daemon:tag-build-master-jewel-ubuntu-14.04"
 
