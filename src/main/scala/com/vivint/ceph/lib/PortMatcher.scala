@@ -7,18 +7,18 @@ import mesosphere.mesos.matcher.{ MatchResult, ResourceMatcher }
 import mesosphere.mesos.protos.Resource
 import org.apache.mesos.Protos
 import scala.annotation.tailrec
-import scala.collection.JavaConversions._
 import com.vivint.ceph.ProtoHelpers
 
 /** Matches only a specific, fixed port */
 class SpecificPortMatcher(port: Int, resourceSelector: ResourceSelector) extends ResourceMatcher {
   import ProtoHelpers._
   val resourceName = Resource.PORTS
+
   def apply(offerId: String, resources: Iterable[Protos.Resource]): Iterable[MatchResult] = {
 
     (for {
-      resource <- resources.filter(resourceSelector(_)).headOption
-      range <- resource.ranges.headOption
+      resource <- resources.filter(resourceSelector(_)).toStream
+      range <- resource.ranges.toStream
       if range.contains(port.toLong)
     } yield {
       List(
@@ -29,7 +29,7 @@ class SpecificPortMatcher(port: Int, resourceSelector: ResourceSelector) extends
             resource.toBuilder().
               setRanges(newRanges(List(port.toLong to port.toLong)))
               .build)))
-    }) getOrElse {
+    }).headOption getOrElse {
       List(
         PortsMatchResult(
           false,
