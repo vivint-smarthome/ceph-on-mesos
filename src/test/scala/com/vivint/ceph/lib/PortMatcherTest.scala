@@ -43,4 +43,22 @@ class PortMatcherTest extends FunSpec with Matchers {
       result.matches shouldBe false
     }
   }
+
+  describe("ContiguousPortMatcher") {
+    it("matches a port block in subsequent ranges") {
+      val matcher = new ContiguousPortMatcher(5, ResourceSelector.any(Set("*")))
+      val Seq(result) = matcher("offer-0",
+        Seq(
+          newRangesResource(PORTS, Seq(800L to 801L), role = "*"),
+          newRangesResource(PORTS, Seq(1000L to 1005L), role = "*")))
+
+      result.matches shouldBe true
+      val Seq(consumed) = result.consumedResources
+      consumed.getRole shouldBe "*"
+      consumed.getName shouldBe PORTS
+      consumed.getRanges.getRange(0).getBegin shouldBe 1000L
+      consumed.getRanges.getRange(0).getEnd shouldBe 1004L
+    }
+
+  }
 }
